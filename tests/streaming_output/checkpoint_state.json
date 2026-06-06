@@ -1,0 +1,14 @@
+[
+  {
+    "user_id": "user_1",
+    "category_name": "Action Movies",
+    "total_ratings": 1,
+    "total_rating_sum": 5.0
+  },
+  {
+    "user_id": "user_2",
+    "category_name": "Comedy Shows",
+    "total_ratings": 1,
+    "total_rating_sum": 3.0
+  }
+]

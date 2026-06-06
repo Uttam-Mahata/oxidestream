@@ -1,0 +1,4 @@
+user_id,active,region
+user_1,true,US
+user_2,false,EU
+user_3,true,US

@@ -1,0 +1,15 @@
+Registering worker with master at http://127.0.0.1:50050...
+Successfully registered worker worker-2 with master
+Starting heartbeat loop...
+Starting Arrow Flight server on 0.0.0.0:50054...
+Starting WorkerControl server on 0.0.0.0:50053...
+Received SubmitTaskRequest: task_id=job-1780600460523095767-map-0, stage_id=map-stage, stage_type=1
+Received SubmitTaskRequest: task_id=job-1780600460523146200-map-0, stage_id=map-stage, stage_type=1
+Finished task job-1780600460523146200-map-0
+Finished task job-1780600460523095767-map-0
+Received SubmitTaskRequest: task_id=job-1780600460523146200-reduce-0, stage_id=reduce-stage, stage_type=2
+Received SubmitTaskRequest: task_id=job-1780600460523095767-reduce-0, stage_id=reduce-stage, stage_type=2
+Reduce task failed: SchemaError(FieldNotFound { field: Column { relation: None, name: "s" }, valid_fields: [Column { relation: Some(Bare { table: "input" }), name: "user_id" }, Column { relation: Some(Bare { table: "input" }), name: "cnt" }] }, Some(""))
+Reduce task failed: SchemaError(FieldNotFound { field: Column { relation: None, name: "cnt" }, valid_fields: [Column { relation: Some(Bare { table: "input" }), name: "user_id" }, Column { relation: Some(Bare { table: "input" }), name: "s" }] }, Some(""))
+Finished task job-1780600460523095767-reduce-0
+Finished task job-1780600460523146200-reduce-0

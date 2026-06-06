@@ -1,0 +1,26 @@
+[package]
+name = "data-plane"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tonic = { version = "0.11", features = ["transport"] }
+prost = "0.12"
+datafusion = "37.0"
+arrow = { version = "51.0", features = ["ipc", "csv", "json"] }
+arrow-flight = { version = "51.0", features = ["flight-sql-experimental"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.0", features = ["v4"] }
+clap = { version = "4.4", features = ["derive"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+futures = "0.3"
+futures-util = "0.3"
+bytes = "1"
+http = "1"
+chrono = "=0.4.38"
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+[build-dependencies]
+tonic-build = "0.11"

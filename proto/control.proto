@@ -1,0 +1,137 @@
+syntax = "proto3";
+
+package control;
+
+option go_package = "control-plane/pkg/proto;proto";
+
+// Service implemented by the Go Master (Control Plane)
+service ControlPlane {
+    rpc RegisterWorker (RegisterWorkerRequest) returns (RegisterWorkerResponse);
+    rpc Heartbeat (HeartbeatRequest) returns (HeartbeatResponse);
+    rpc UpdateTaskStatus (TaskStatusUpdateRequest) returns (TaskStatusUpdateResponse);
+}
+
+// Service implemented by the Rust Worker (Data Plane)
+service WorkerControl {
+    rpc SubmitTask (SubmitTaskRequest) returns (SubmitTaskResponse);
+    rpc CancelTask (CancelTaskRequest) returns (CancelTaskResponse);
+}
+
+enum TaskStatus {
+    TASK_STATUS_UNSPECIFIED = 0;
+    TASK_STATUS_PENDING = 1;
+    TASK_STATUS_RUNNING = 2;
+    TASK_STATUS_COMPLETED = 3;
+    TASK_STATUS_FAILED = 4;
+}
+
+enum StageType {
+    STAGE_TYPE_UNSPECIFIED = 0;
+    STAGE_TYPE_MAP = 1;
+    STAGE_TYPE_REDUCE = 2;
+}
+
+message RegisterWorkerRequest {
+    string worker_id = 1;
+    string host = 2;
+    int32 control_port = 3;
+    int32 flight_port = 4;
+    int32 num_cores = 5;
+    int64 total_memory_mb = 6;
+}
+
+message RegisterWorkerResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message HeartbeatRequest {
+    string worker_id = 1;
+    float cpu_usage_pct = 2;
+    int64 memory_used_mb = 3;
+    int32 active_tasks = 4;
+}
+
+message HeartbeatResponse {
+    bool success = 1;
+}
+
+message PartitionMetadata {
+    int32 partition_id = 1;
+    string worker_id = 2;
+    string flight_address = 3;
+    string task_id = 4;
+    int64 size_bytes = 5; // Size in bytes of the partition for Adaptive Query Execution (AQE)
+}
+
+message ColumnStats {
+    string column_name = 1;
+    int64 cardinality = 2;
+    int64 null_count = 3;
+}
+
+message TableStats {
+    int64 row_count = 1;
+    int64 size_bytes = 2;
+    repeated ColumnStats col_stats = 3;
+}
+
+message TaskStatusUpdateRequest {
+    string task_id = 1;
+    string stage_id = 2;
+    string worker_id = 3;
+    TaskStatus status = 4;
+    string error_message = 5;
+    repeated PartitionMetadata produced_partitions = 6;
+    TableStats table_stats = 7;
+}
+
+message TaskStatusUpdateResponse {
+    bool success = 1;
+}
+
+message ShuffleInput {
+    int32 partition_id = 1;
+    string worker_id = 2;
+    string flight_address = 3;
+    string mapper_task_id = 4;
+    repeated int32 partition_ids = 5; // Support pulling multiple coalesced partitions
+}
+
+message SubmitTaskRequest {
+    string task_id = 1;
+    string stage_id = 2;
+    StageType stage_type = 3;
+    
+    // Config for MAP stage
+    repeated string input_files = 4;
+    string map_sql = 5;
+    
+    // Config for REDUCE stage
+    string reduce_sql = 6;
+    int32 output_partition_id = 7;
+    repeated ShuffleInput shuffle_inputs = 8;
+    
+    // General parameters
+    int32 num_partitions = 9;
+    string output_dir = 10;
+
+    // AQE & Broadcast Join configuration
+    repeated int32 coalesced_partitions = 11;
+    repeated string broadcast_files = 12;
+    repeated string broadcast_table_names = 13;
+}
+
+message SubmitTaskResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message CancelTaskRequest {
+    string task_id = 1;
+}
+
+message CancelTaskResponse {
+    bool success = 1;
+    string message = 2;
+}

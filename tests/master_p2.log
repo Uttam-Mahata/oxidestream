@@ -1,0 +1,23 @@
+2026/06/05 00:28:14 Starting OxideStream Control Plane (Master)...
+2026/06/05 00:28:14 Scheduler loop started.
+2026/06/05 00:28:14 Worker tracker started with heartbeat timeout 10s
+2026/06/05 00:28:14 REST HTTP API server listening on port 8080
+2026/06/05 00:28:14 gRPC Control Plane server listening on port 50050
+2026/06/05 00:28:16 Registering worker: ID=worker-2, Host=127.0.0.1, ControlPort=50053, FlightPort=50054
+2026/06/05 00:28:16 Registering worker: ID=worker-1, Host=127.0.0.1, ControlPort=50051, FlightPort=50052
+2026/06/05 00:28:19 Starting Distributed PageRank Graph Job with 1 iterations...
+2026/06/05 00:28:19 PageRank: Iteration 1/1...
+2026/06/05 00:28:19 Submitted MapReduce job job-1780599499422901578 with 1 files. Queue depth: 1
+2026/06/05 00:28:19 Running job job-1780599499422901578, SQL: "SELECT rank / out_degree AS rank_contrib, target FROM input"
+2026/06/05 00:28:19 CBO: Job job-1780599499422901578 - Main datasets: [/home/neutrino/oxidestream/tests/data/pagerank_data.csv], Broadcast files: []
+2026/06/05 00:28:19 Submitting task job-1780599499422901578-map-0 (STAGE_TYPE_MAP) to worker worker-2 at 127.0.0.1:50053
+2026/06/05 00:28:19 Task job-1780599499422901578-map-0 successfully submitted to worker worker-2
+2026/06/05 00:28:19 Task job-1780599499422901578-map-0 (map-stage) status updated to COMPLETED by worker worker-2
+2026/06/05 00:28:19 Map stage for job job-1780599499422901578 completed. Initializing Reduce stage.
+2026/06/05 00:28:19 AQE: Partition coalescing groups for job job-1780599499422901578: [[0 1]]
+2026/06/05 00:28:19 Submitting task job-1780599499422901578-reduce-0 (STAGE_TYPE_REDUCE) to worker worker-2 at 127.0.0.1:50053
+2026/06/05 00:28:19 Task job-1780599499422901578-reduce-0 successfully submitted to worker worker-2
+2026/06/05 00:28:19 Task job-1780599499422901578-reduce-0 (reduce-stage) status updated to COMPLETED by worker worker-2
+2026/06/05 00:28:20 Job job-1780599499422901578 completed successfully
+2026/06/05 00:28:20 PageRank: Iteration 1 complete.
+2026/06/05 00:28:21 Distributed PageRank Graph Job completed successfully!

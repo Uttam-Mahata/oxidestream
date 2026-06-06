@@ -1,0 +1,4 @@
+target,rank,out_degree
+node_A,1.0,2.0
+node_B,1.0,2.0
+node_C,1.0,1.0

@@ -1,0 +1,19 @@
+2026/06/05 00:27:34 Starting OxideStream Control Plane (Master)...
+2026/06/05 00:27:34 Scheduler loop started.
+2026/06/05 00:27:34 Worker tracker started with heartbeat timeout 10s
+2026/06/05 00:27:34 REST HTTP API server listening on port 8080
+2026/06/05 00:27:34 gRPC Control Plane server listening on port 50050
+2026/06/05 00:27:36 Registering worker: ID=worker-2, Host=127.0.0.1, ControlPort=50052, FlightPort=50053
+2026/06/05 00:27:36 Registering worker: ID=worker-1, Host=127.0.0.1, ControlPort=50051, FlightPort=50052
+2026/06/05 00:27:40 Submitted MapReduce job job-1780599460239314700 with 4 files. Queue depth: 1
+2026/06/05 00:27:40 Running job job-1780599460239314700, SQL: "SELECT r.user_id, c.category_name, COUNT(1) as rating_count, SUM(r.rating) as rating_sum FROM input r JOIN category_lookup c ON r.category = c.category GROUP BY r.user_id, c.category_name"
+2026/06/05 00:27:40 CBO: Job job-1780599460239314700 - Main datasets: [/home/neutrino/oxidestream/tests/data/part-2.csv], Broadcast files: [/home/neutrino/oxidestream/tests/data/part-0.csv /home/neutrino/oxidestream/tests/data/part-1.csv /home/neutrino/oxidestream/tests/data/category_lookup.csv]
+2026/06/05 00:27:40 Submitting task job-1780599460239314700-map-0 (STAGE_TYPE_MAP) to worker worker-2 at 127.0.0.1:50052
+2026/06/05 00:27:40 Task job-1780599460239314700-map-0 successfully submitted to worker worker-2
+2026/06/05 00:27:40 Task job-1780599460239314700-map-0 (map-stage) status updated to COMPLETED by worker worker-2
+2026/06/05 00:27:40 Map stage for job job-1780599460239314700 completed. Initializing Reduce stage.
+2026/06/05 00:27:40 AQE: Partition coalescing groups for job job-1780599460239314700: [[0 1 2 3]]
+2026/06/05 00:27:40 Submitting task job-1780599460239314700-reduce-0 (STAGE_TYPE_REDUCE) to worker worker-2 at 127.0.0.1:50052
+2026/06/05 00:27:40 Task job-1780599460239314700-reduce-0 successfully submitted to worker worker-2
+2026/06/05 00:27:40 Task job-1780599460239314700-reduce-0 (reduce-stage) status updated to COMPLETED by worker worker-2
+2026/06/05 00:27:41 Job job-1780599460239314700 completed successfully

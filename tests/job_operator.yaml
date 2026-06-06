@@ -1,0 +1,17 @@
+# OxideStreamApplication CRD Specification
+grpcPort: 50050
+httpPort: 8080
+replicas: 2
+flightPortStart: 50052
+controlPortStart: 50051
+
+mapSql: "SELECT r.user_id, c.category_name, COUNT(1) as rating_count, SUM(r.rating) as rating_sum FROM input r JOIN category_lookup c ON r.category = c.category GROUP BY r.user_id, c.category_name"
+reduceSql: "SELECT user_id, category_name, SUM(rating_count) as total_ratings, SUM(rating_sum) as total_rating_sum FROM input GROUP BY user_id, category_name"
+numPartitions: 4
+outputDir: "/home/neutrino/oxidestream/tests/operator_output"
+
+inputFiles:
+  - "/home/neutrino/oxidestream/tests/data/part-2.csv"
+  - "/home/neutrino/oxidestream/tests/data/part-0.csv"
+  - "/home/neutrino/oxidestream/tests/data/part-1.csv"
+  - "/home/neutrino/oxidestream/tests/data/category_lookup.csv"

@@ -1,0 +1,4 @@
+user_id,rating,timestamp,category
+user_1,5,1780598003,action
+user_2,3,1780598004,comedy
+user_3,4,1780597990,action

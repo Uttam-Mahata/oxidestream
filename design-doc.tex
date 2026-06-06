@@ -1,0 +1,141 @@
+\documentclass[11pt, a4paper]{article}
+
+% --- UNIVERSAL PREAMBLE BLOCK ---
+\usepackage[a4paper, top=2.5cm, bottom=2.5cm, left=2cm, right=2cm]{geometry}
+\usepackage{fontspec}
+
+\usepackage[english, bidi=basic, provide=*]{babel}
+\babelprovide[import, onchar=ids fonts]{english}
+
+% Set default/Latin font to Sans Serif in the main (rm) slot
+\babelfont{rm}{Noto Sans}
+
+% Add because main language is not English (ensuring universal compatibility)
+\usepackage{enumitem}
+\setlist[itemize]{label=-}
+% --- END UNIVERSAL PREAMBLE BLOCK ---
+
+\usepackage{booktabs}
+\usepackage{microtype}
+\usepackage{parskip}
+\usepackage{hyperref} % Must be last
+
+\title{\textbf{System Design Document} \\ \Large A Production-Grade Distributed Data Processing Engine Integrating Go and Rust}
+\author{Infrastructure Engineering Team}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This document details the architectural blueprint for a distributed, high-performance data processing engine (analogous to Apache Spark) utilizing a dual-language paradigm. By segregating the system into a Go-based Control Plane and a Rust-based Data Plane, we achieve a "best of both worlds" infrastructure: the concurrency, rapid development, and mature distributed coordination libraries of Go, combined with the memory safety, predictable performance (zero Garbage Collection pauses), and SIMD-optimized execution of Rust. Communication is strictly governed by gRPC for control and Apache Arrow Flight for high-throughput data shuffling.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Introduction}
+Modern distributed compute engines often suffer from the latency and memory overhead associated with Garbage Collected (GC) languages (like Java/Scala in Apache Spark) during massive aggregations or shuffles. This project aims to construct a next-generation distributed processing system capable of executing Directed Acyclic Graphs (DAGs) of computational tasks. The core philosophy is strict role separation based on language strengths: Go is the brain; Rust is the muscle.
+
+\section{High-Level Architecture}
+The system architecture follows a classic Master-Worker model but enforces a strict language and protocol boundary between the orchestrator and the execution nodes.
+
+\begin{verbatim}
+      +---------------------------------------------------+
+      |             Go Control Plane (Master)             |
+      |                                                   |
+      |  +---------------+ +--------------+ +----------+  |
+      |  | Client API/SQL| | DAG Scheduler| | Raft Meta|  |
+      |  +---------------+ +--------------+ +----------+  |
+      +-------------------------+-------------------------+
+                                |
+                                | gRPC / Protocol Buffers (Commands)
+                                |
+           +--------------------+--------------------+
+           |                    |                    |
+           v                    v                    v
+  +-----------------+  +-----------------+  +-----------------+
+  | Rust Worker Node|  | Rust Worker Node|  | Rust Worker Node|
+  |  (Data Plane)   |  |  (Data Plane)   |  |  (Data Plane)   |
+  |                 |  |                 |  |                 |
+  | [ DataFusion ]  |  | [ DataFusion ]  |  | [ DataFusion ]  |
+  | [Apache Arrow]<-+->| [Apache Arrow]<-+->| [Apache Arrow]  |
+  +-----------------+  +-----------------+  +-----------------+
+                        Arrow Flight (Data Shuffle)
+\end{verbatim}
+
+\section{Component Design}
+
+\subsection{The Control Plane (Go)}
+The Control Plane is responsible for global state management, client interactions, and cluster orchestration. Go is selected due to its lightweight goroutines, standard library for networking, and robust ecosystem for distributed systems.
+
+\begin{itemize}
+    \item \textbf{Cluster Coordination (Raft):} Using HashiCorp's Raft implementation, multiple Go coordinator nodes maintain a highly available consensus on cluster state, active worker nodes, and metadata (table schemas, partitions).
+    \item \textbf{Query Parser \& DAG Scheduler:} Clients submit queries via a REST/gRPC API. The Go engine parses the query, applies logical optimizations, and translates it into a physical Directed Acyclic Graph (DAG) of discrete tasks.
+    \item \textbf{Resource Manager:} Tracks CPU and memory availability on Rust workers via continuous heartbeat streams over gRPC. It schedules DAG tasks to workers possessing data locality or sufficient resources.
+\end{itemize}
+
+\subsection{The Data Plane (Rust)}
+The Data Plane consists of stateless worker nodes responsible solely for heavy computation. Rust is utilized to eliminate GC pauses, ensuring predictable, high-throughput execution on multi-core systems.
+
+\begin{itemize}
+    \item \textbf{Execution Engine:} Built upon Apache DataFusion and Apache Arrow. It receives physical execution plans from the Go Control Plane and executes them. Arrow provides a standardized columnar memory format, enabling vectorized, SIMD-accelerated calculations.
+    \item \textbf{Memory Management:} Rust's ownership model ensures deterministic memory deallocation. Nodes can process gigabytes of data in memory and drop it instantly when the task scope ends, preventing out-of-memory (OOM) cascading failures common in JVM-based systems.
+    \item \textbf{Local Storage Manager:} Handles spilling to disk using fast I/O interfaces (like \texttt{io\_uring} or \texttt{sendfile}) when intermediate results exceed available RAM.
+\end{itemize}
+
+\section{Communication Protocols}
+
+Inter-Process Communication (IPC) is the most critical bottleneck in hybrid architectures. This system utilizes two distinct protocols tailored to their specific workloads.
+
+\subsection{Control Traffic: gRPC and Protocol Buffers}
+All commands, health checks, and metadata exchange occur over gRPC.
+\begin{itemize}
+    \item \textbf{Language Agnostic:} Protobuf schemas ensure structural contracts between Go and Rust.
+    \item \textbf{Low Overhead:} Highly optimized for small, frequent messages (e.g., "Execute Task 123", "Worker Node Heartbeat").
+\end{itemize}
+
+\subsection{Data Traffic (Shuffling): Apache Arrow Flight}
+When intermediate data must be moved between Rust worker nodes (a "shuffle" step in a reduce operation), serialization to JSON or even standard Protobufs is prohibitively slow.
+\begin{itemize}
+    \item \textbf{Zero-Copy Serialization:} Arrow Flight streams the raw memory buffers representing the columnar data directly over gRPC/TCP. The receiving Rust node maps these bytes directly into memory without requiring a deserialization step.
+    \item \textbf{High Throughput:} Designed explicitly for massive analytical data pipelines, operating at near hardware network limits.
+\end{itemize}
+
+\section{Job Execution Lifecycle}
+
+\begin{enumerate}
+    \item \textbf{Submission:} A client submits a SQL query to the Go Control Plane.
+    \item \textbf{Planning:} The Go DAG engine compiles the query, breaks it into Map and Reduce stages, and generates Protobuf-encoded Task objects.
+    \item \textbf{Dispatch:} The Go scheduler opens a gRPC stream to available Rust workers and sends the tasks.
+    \item \textbf{Execution (Map):} Rust workers load the initial data (e.g., from S3 or HDFS), process it locally into Arrow RecordBatches, and signal completion to the Go master.
+    \item \textbf{Shuffle:} The Go master instructs specific Rust nodes to pull intermediate data from other Rust nodes. This data is transferred instantaneously using Arrow Flight.
+    \item \textbf{Execution (Reduce) \& Return:} Final aggregations are computed. The resulting Arrow batches are either written to remote storage or streamed back to the Go master, which relays the results to the client.
+\end{enumerate}
+
+\section{Production \& Operational Considerations}
+
+Operating a polyglot system requires rigorous DevOps practices to mitigate deployment complexity.
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Requirement} & \textbf{Strategy} \\ \midrule
+\textbf{CI/CD Pipeline} & Dual-track pipelines. Go builds compile to static binaries. Rust builds \\ 
+& utilize \texttt{cargo release} with static linking (MUSL) to ensure portability. \\ \addlinespace
+\textbf{Protobuf Management} & Centralized schema repository. Automated generation of Go and Rust \\
+& bindings on every merge to \texttt{main} to prevent schema drift. \\ \addlinespace
+\textbf{Telemetry} & Unified OpenTelemetry tracing. Trace IDs must propagate through \\
+& the gRPC context from Go into the Rust execution threads. \\ \addlinespace
+\textbf{Deployment} & Kubernetes StatefulSets for Go Coordinators (Raft stability). \\
+& Kubernetes Deployments/DaemonSets for Rust Workers. \\ \bottomrule
+\end{tabular}
+\caption{Production Strategies for Hybrid Architecture}
+\end{table}
+
+\section{Conclusion}
+By leveraging Go for high-level orchestration and Rust for low-level execution, this architecture bypasses the fundamental limitations of single-language processing engines. The integration of Apache Arrow standardizes memory across the language barrier, while gRPC enforces strong operational contracts. The resulting system is theoretically capable of outperforming traditional JVM-based data engines in both latency and computational throughput, while maintaining a developer-friendly control plane.
+
+\end{document}
