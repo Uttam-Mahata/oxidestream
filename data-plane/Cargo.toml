@@ -21,6 +21,7 @@ bytes = "1"
 http = "1"
 chrono = "=0.4.38"
 rusqlite = { version = "0.31", features = ["bundled"] }
+sysinfo = "0.30"
 
 [build-dependencies]
 tonic-build = "0.11"

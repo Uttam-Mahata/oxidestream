@@ -188,7 +188,8 @@ pub async fn start_heartbeat_loop(
         }
 
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
-        
+        let mut system = sysinfo::System::new_all();
+
         loop {
             interval.tick().await;
 
@@ -200,8 +201,10 @@ pub async fn start_heartbeat_loop(
                 }
             };
 
-            let cpu_usage_pct = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() % 20) as f32 + 5.0;
-            let memory_used_mb = 128 + (state.active_tasks.load(Ordering::SeqCst) as i64 * 64);
+            system.refresh_cpu_usage();
+            system.refresh_memory();
+            let cpu_usage_pct = system.global_cpu_info().cpu_usage();
+            let memory_used_mb = (system.used_memory() / 1024 / 1024) as i64;
             let active_tasks = state.active_tasks.load(Ordering::SeqCst);
 
             let req = HeartbeatRequest {

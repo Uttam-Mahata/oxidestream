@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +41,12 @@ type TaskState struct {
 	BroadcastFiles      []string
 	BroadcastTableNames []string
 	CoalescedPartitions []int32
+	// A5: Speculative execution fields
+	StartTime     time.Time
+	IsSpeculative bool
+	SpeculativeOf string // non-empty only when IsSpeculative; holds the original task's ID
+	// A6: Per-task SQL override (used for skew-split reduce tasks)
+	ReduceSQLOverride string
 }
 
 // Job encapsulates a submitted SQL query and its execution progress.
@@ -156,6 +163,7 @@ func (s *Scheduler) WaitForJob(jobID string) (string, error) {
 
 // Start runs the main scheduler loop, consuming submitted jobs.
 func (s *Scheduler) Start(ctx context.Context) {
+	go s.startSpeculativeMonitor(ctx)
 	log.Println("Scheduler loop started.")
 	for {
 		s.mu.Lock()
@@ -346,10 +354,12 @@ func (s *Scheduler) runJob(ctx context.Context, job *Job) error {
 		var mapError string
 
 		for _, t := range job.MapTasks {
-			if t.Status != TaskCompleted {
+			// A5: tasks cancelled by speculative execution are treated as effectively done.
+			speculativeCancelled := t.Status == TaskFailed && strings.HasPrefix(t.ErrorMsg, "cancelled:")
+			if t.Status != TaskCompleted && !speculativeCancelled {
 				allMapDone = false
 			}
-			if t.Status == TaskFailed {
+			if t.Status == TaskFailed && !speculativeCancelled {
 				anyMapFailed = true
 				mapError = t.ErrorMsg
 			}
@@ -377,6 +387,26 @@ func (s *Scheduler) runJob(ctx context.Context, job *Job) error {
 	// 3. Initialize Reduce Tasks with AQE (Adaptive Query Execution: Partition Coalescing)
 	job.mu.Lock()
 	job.ReduceTasks = make(map[string]*TaskState)
+
+	// A6: Skew detection — collect per-partition sizes and identify hot partitions.
+	var partitionSizes []int64
+	for p := int32(0); p < job.NumPartitions; p++ {
+		parts := s.store.GetPartitions(p)
+		size := int64(0)
+		for _, part := range parts {
+			size += part.SizeBytes
+		}
+		partitionSizes = append(partitionSizes, size)
+	}
+	medianSize := computeMedian(partitionSizes)
+	skewedPartitions := make(map[int32]bool)
+	for p, size := range partitionSizes {
+		if medianSize > 0 && size > 3*medianSize {
+			log.Printf("[SKEWED_PARTITION] Partition %d is %.1fx median (size=%d, median=%d) - splitting into 2 reduce tasks",
+				p, float64(size)/float64(medianSize), size, medianSize)
+			skewedPartitions[int32(p)] = true
+		}
+	}
 
 	var coalescedGroups [][]int32
 	var currentGroup []int32
@@ -410,8 +440,42 @@ func (s *Scheduler) runJob(ctx context.Context, job *Job) error {
 
 	log.Printf("AQE: Partition coalescing groups for job %s: %v", job.JobID, coalescedGroups)
 
+	baseReduceSQL := job.ReduceSQL
+	if baseReduceSQL == "" {
+		baseReduceSQL = job.SQL
+	}
+
 	for _, group := range coalescedGroups {
 		outPartitionID := group[0]
+
+		// A6: For single-partition skewed groups, split into two parallel reduce tasks.
+		if len(group) == 1 && skewedPartitions[group[0]] {
+			p := group[0]
+			taskID0 := fmt.Sprintf("%s-reduce-%d", job.JobID, outPartitionID*2)
+			taskID1 := fmt.Sprintf("%s-reduce-%d", job.JobID, outPartitionID*2+1)
+			job.ReduceTasks[taskID0] = &TaskState{
+				TaskID:              taskID0,
+				StageID:             "reduce-stage",
+				StageType:           pb.StageType_STAGE_TYPE_REDUCE,
+				OutputPartitionID:   outPartitionID * 2,
+				CoalescedPartitions: []int32{p},
+				Status:              TaskPending,
+				LastUpdated:         time.Now(),
+				ReduceSQLOverride:   baseReduceSQL + " -- skew_split:0",
+			}
+			job.ReduceTasks[taskID1] = &TaskState{
+				TaskID:              taskID1,
+				StageID:             "reduce-stage",
+				StageType:           pb.StageType_STAGE_TYPE_REDUCE,
+				OutputPartitionID:   outPartitionID*2 + 1,
+				CoalescedPartitions: []int32{p},
+				Status:              TaskPending,
+				LastUpdated:         time.Now(),
+				ReduceSQLOverride:   baseReduceSQL + " -- skew_split:1",
+			}
+			continue
+		}
+
 		taskID := fmt.Sprintf("%s-reduce-%d", job.JobID, outPartitionID)
 		job.ReduceTasks[taskID] = &TaskState{
 			TaskID:              taskID,
@@ -439,9 +503,11 @@ func (s *Scheduler) runJob(ctx context.Context, job *Job) error {
 		var reduceError string
 
 		// If a map task was marked pending again due to worker failure, we must complete Map stage first.
+		// A5: tasks cancelled by speculative execution are treated as effectively done.
 		anyMapPendingOrRunning := false
 		for _, t := range job.MapTasks {
-			if t.Status != TaskCompleted {
+			speculativeCancelled := t.Status == TaskFailed && strings.HasPrefix(t.ErrorMsg, "cancelled:")
+			if t.Status != TaskCompleted && !speculativeCancelled {
 				anyMapPendingOrRunning = true
 				allReduceDone = false
 			}
@@ -456,10 +522,12 @@ func (s *Scheduler) runJob(ctx context.Context, job *Job) error {
 		}
 
 		for _, t := range job.ReduceTasks {
-			if t.Status != TaskCompleted {
+			// A5: tasks cancelled by speculative execution are treated as effectively done.
+			speculativeCancelled := t.Status == TaskFailed && strings.HasPrefix(t.ErrorMsg, "cancelled:")
+			if t.Status != TaskCompleted && !speculativeCancelled {
 				allReduceDone = false
 			}
-			if t.Status == TaskFailed {
+			if t.Status == TaskFailed && !speculativeCancelled {
 				anyReduceFailed = true
 				reduceError = t.ErrorMsg
 			}
@@ -529,6 +597,28 @@ func (s *Scheduler) dispatchPendingTasks(ctx context.Context, job *Job, tasks ma
 		log.Println("[SCALE_OUT_WORKERS]")
 	}
 
+	// A4: Load-aware worker selection — sort by CPU usage ascending (least loaded first).
+	sort.Slice(activeWorkers, func(i, j int) bool {
+		return activeWorkers[i].CpuUsagePct < activeWorkers[j].CpuUsagePct
+	})
+
+	// Separate workers into preferred (CPU ≤ 80 %) and overloaded (CPU > 80 %) pools.
+	var preferredWorkers []*raft.WorkerConfig
+	var overloadedWorkers []*raft.WorkerConfig
+	for _, w := range activeWorkers {
+		if w.CpuUsagePct <= 80.0 {
+			preferredWorkers = append(preferredWorkers, w)
+		} else {
+			overloadedWorkers = append(overloadedWorkers, w)
+		}
+	}
+
+	// Fall back to overloaded workers only when there is no other option.
+	workerPool := preferredWorkers
+	if len(workerPool) == 0 {
+		workerPool = overloadedWorkers
+	}
+
 	workerIdx := 0
 	dispatched := 0
 	for _, task := range tasks {
@@ -539,14 +629,17 @@ func (s *Scheduler) dispatchPendingTasks(ctx context.Context, job *Job, tasks ma
 			break
 		}
 
-		// Round-robin selection of active workers
-		worker := activeWorkers[workerIdx%len(activeWorkers)]
+		worker := workerPool[workerIdx%len(workerPool)]
 		workerIdx++
 
 		task.Status = TaskRunning
 		task.WorkerID = worker.WorkerID
+		task.StartTime = time.Now()
 		task.LastUpdated = time.Now()
 		dispatched++
+
+		log.Printf("[DISPATCH] Task %s -> worker %s (CPU: %.1f%%)",
+			task.TaskID, worker.WorkerID, worker.CpuUsagePct)
 
 		go s.submitTaskToWorker(ctx, job, task, worker)
 	}
@@ -557,7 +650,7 @@ func (s *Scheduler) submitTaskToWorker(ctx context.Context, job *Job, task *Task
 		task.TaskID, task.StageType, worker.WorkerID, worker.Host, worker.ControlPort)
 
 	addr := fmt.Sprintf("%s:%d", worker.Host, worker.ControlPort)
-	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		log.Printf("Failed to dial worker %s: %v", worker.WorkerID, err)
 		job.mu.Lock()
@@ -577,6 +670,10 @@ func (s *Scheduler) submitTaskToWorker(ctx context.Context, job *Job, task *Task
 	reduceSQL := job.ReduceSQL
 	if reduceSQL == "" {
 		reduceSQL = job.SQL
+	}
+	// A6: Per-task SQL override for skew-split reduce tasks.
+	if task.ReduceSQLOverride != "" {
+		reduceSQL = task.ReduceSQLOverride
 	}
 
 	var req *pb.SubmitTaskRequest
@@ -826,9 +923,214 @@ func (s *Scheduler) HandleTaskStatusUpdate(taskID string, stageID string, worker
 				}
 			}
 		}
+
+		// A5: Speculative execution — cancel the twin task now that one side has won.
+		var taskMap map[string]*TaskState
+		if stageID == "map-stage" {
+			taskMap = targetJob.MapTasks
+		} else {
+			taskMap = targetJob.ReduceTasks
+		}
+
+		var twinTask *TaskState
+		if tState.IsSpeculative {
+			// This speculative copy finished first — cancel the original task.
+			if orig, ok := taskMap[tState.SpeculativeOf]; ok {
+				if orig.Status != TaskCompleted && orig.Status != TaskFailed {
+					orig.Status = TaskFailed
+					orig.ErrorMsg = "cancelled: speculative copy won"
+					twinTask = orig
+					log.Printf("[SPECULATIVE] Speculative copy %s won; cancelling original %s", tState.TaskID, orig.TaskID)
+				}
+			}
+		} else {
+			// The original finished first — cancel any speculative copy.
+			for _, t := range taskMap {
+				if t.SpeculativeOf == tState.TaskID && t.Status != TaskCompleted && t.Status != TaskFailed {
+					t.Status = TaskFailed
+					t.ErrorMsg = "cancelled: original won"
+					twinTask = t
+					log.Printf("[SPECULATIVE] Original %s won; cancelling speculative copy %s", tState.TaskID, t.TaskID)
+					break
+				}
+			}
+		}
+
+		if twinTask != nil {
+			go s.cancelTaskOnWorker(context.Background(), twinTask)
+		}
 	}
 
 	return nil
+}
+
+// computeMedian returns the median value from a slice of int64 sizes.
+// It sorts a copy of the slice so the original is not modified.
+func computeMedian(sizes []int64) int64 {
+	if len(sizes) == 0 {
+		return 0
+	}
+	cp := make([]int64, len(sizes))
+	copy(cp, sizes)
+	sort.Slice(cp, func(i, j int) bool { return cp[i] < cp[j] })
+	return cp[len(cp)/2]
+}
+
+// startSpeculativeMonitor runs a background goroutine that periodically checks for
+// stragglers and launches speculative duplicate tasks to reduce tail latency.
+func (s *Scheduler) startSpeculativeMonitor(ctx context.Context) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// Snapshot the job list under s.mu, then release the lock before
+			// touching individual jobs so we avoid nested lock ordering issues.
+			s.mu.Lock()
+			jobList := make([]*Job, 0, len(s.jobs))
+			for _, j := range s.jobs {
+				jobList = append(jobList, j)
+			}
+			s.mu.Unlock()
+
+			for _, job := range jobList {
+				s.checkSpeculativeForJob(ctx, job)
+			}
+		}
+	}
+}
+
+// checkSpeculativeForJob inspects running tasks in a single job and launches
+// speculative copies for tasks that are running significantly slower than the median.
+func (s *Scheduler) checkSpeculativeForJob(ctx context.Context, job *Job) {
+	job.mu.Lock()
+	defer job.mu.Unlock()
+
+	if job.Status != "RUNNING" {
+		return
+	}
+
+	// Build a combined view of all tasks so we can compute a cross-stage median.
+	allTasks := make(map[string]*TaskState, len(job.MapTasks)+len(job.ReduceTasks))
+	for id, t := range job.MapTasks {
+		allTasks[id] = t
+	}
+	for id, t := range job.ReduceTasks {
+		allTasks[id] = t
+	}
+
+	// Compute the median duration of completed tasks.
+	var completedDurations []time.Duration
+	for _, t := range allTasks {
+		if t.Status == TaskCompleted && !t.StartTime.IsZero() {
+			completedDurations = append(completedDurations, t.LastUpdated.Sub(t.StartTime))
+		}
+	}
+	if len(completedDurations) == 0 {
+		return
+	}
+	sort.Slice(completedDurations, func(i, j int) bool { return completedDurations[i] < completedDurations[j] })
+	medianDuration := completedDurations[len(completedDurations)/2]
+
+	// Do not speculate when the median is very small — the overhead would dominate.
+	if medianDuration <= 5*time.Second {
+		return
+	}
+	threshold := time.Duration(float64(medianDuration) * 1.5)
+
+	// Look up available workers once; we release job.mu during the store call later,
+	// but here we only call GetActiveWorkers (store-level lock, no conflict).
+	activeWorkers := s.store.GetActiveWorkers()
+
+	for _, t := range allTasks {
+		if t.Status != TaskRunning || t.StartTime.IsZero() || t.IsSpeculative {
+			continue
+		}
+		if time.Since(t.StartTime) <= threshold {
+			continue
+		}
+
+		// Check whether a speculative copy already exists.
+		alreadySpeculated := false
+		for _, other := range allTasks {
+			if other.SpeculativeOf == t.TaskID {
+				alreadySpeculated = true
+				break
+			}
+		}
+		if alreadySpeculated {
+			continue
+		}
+
+		// Find a different worker to run the speculative copy on.
+		var speculativeWorker *raft.WorkerConfig
+		for _, w := range activeWorkers {
+			if w.WorkerID != t.WorkerID {
+				speculativeWorker = w
+				break
+			}
+		}
+		if speculativeWorker == nil {
+			continue // No alternative worker available.
+		}
+
+		specTaskID := t.TaskID + "-spec"
+		specTask := &TaskState{
+			TaskID:              specTaskID,
+			StageID:             t.StageID,
+			StageType:           t.StageType,
+			InputFiles:          t.InputFiles,
+			OutputPartitionID:   t.OutputPartitionID,
+			Status:              TaskPending,
+			LastUpdated:         time.Now(),
+			BroadcastFiles:      t.BroadcastFiles,
+			BroadcastTableNames: t.BroadcastTableNames,
+			CoalescedPartitions: t.CoalescedPartitions,
+			ReduceSQLOverride:   t.ReduceSQLOverride,
+			IsSpeculative:       true,
+			SpeculativeOf:       t.TaskID,
+		}
+
+		if t.StageID == "map-stage" {
+			job.MapTasks[specTaskID] = specTask
+		} else {
+			job.ReduceTasks[specTaskID] = specTask
+		}
+
+		log.Printf("[SPECULATIVE] Launching speculative copy of task %s on different worker", t.TaskID)
+	}
+}
+
+// cancelTaskOnWorker dials the worker that owns the given task and sends a CancelTask RPC.
+// Errors are intentionally ignored — the worker may have already finished the task.
+func (s *Scheduler) cancelTaskOnWorker(ctx context.Context, task *TaskState) {
+	if task.WorkerID == "" {
+		return
+	}
+
+	allWorkers := s.store.GetAllWorkers()
+	var targetWorker *raft.WorkerConfig
+	for _, w := range allWorkers {
+		if w.WorkerID == task.WorkerID {
+			targetWorker = w
+			break
+		}
+	}
+	if targetWorker == nil {
+		return
+	}
+
+	addr := fmt.Sprintf("%s:%d", targetWorker.Host, targetWorker.ControlPort)
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	client := pb.NewWorkerControlClient(conn)
+	_, _ = client.CancelTask(ctx, &pb.CancelTaskRequest{TaskId: task.TaskID})
 }
 
 // GetPendingTasksCount returns the total number of tasks currently in PENDING status.

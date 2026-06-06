@@ -16,6 +16,8 @@ type WorkerConfig struct {
 	TotalMemoryMB int64     `json:"total_memory_mb"`
 	LastActive    time.Time `json:"last_active"`
 	Active        bool      `json:"active"`
+	CpuUsagePct   float32   `json:"cpu_usage_pct"`
+	MemoryUsedMB  int64     `json:"memory_used_mb"`
 }
 
 // ColumnStats represents table stats for a column.
@@ -97,8 +99,9 @@ func (s *MetadataStore) RegisterWorker(w *WorkerConfig) error {
 	return nil
 }
 
-// UpdateWorkerHeartbeat updates the worker's last active timestamp and sets active status.
-func (s *MetadataStore) UpdateWorkerHeartbeat(workerID string) error {
+// UpdateWorkerHeartbeat updates the worker's last active timestamp, sets active status,
+// and records the latest CPU and memory metrics reported by the worker.
+func (s *MetadataStore) UpdateWorkerHeartbeat(workerID string, cpuPct float32, memMB int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -108,6 +111,8 @@ func (s *MetadataStore) UpdateWorkerHeartbeat(workerID string) error {
 	}
 	w.LastActive = time.Now()
 	w.Active = true
+	w.CpuUsagePct = cpuPct
+	w.MemoryUsedMB = memMB
 	return nil
 }
 

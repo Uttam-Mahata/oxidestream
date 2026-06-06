@@ -49,7 +49,7 @@ func (s *grpcServer) RegisterWorker(ctx context.Context, req *pb.RegisterWorkerR
 }
 
 func (s *grpcServer) Heartbeat(ctx context.Context, req *pb.HeartbeatRequest) (*pb.HeartbeatResponse, error) {
-	err := s.store.UpdateWorkerHeartbeat(req.WorkerId)
+	err := s.store.UpdateWorkerHeartbeat(req.WorkerId, req.CpuUsagePct, req.MemoryUsedMb)
 	if err != nil {
 		// Log but return failure response instead of gRPC error
 		log.Printf("Heartbeat failed for unregistered worker: %s", req.WorkerId)
