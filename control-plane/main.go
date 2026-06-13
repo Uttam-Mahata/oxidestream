@@ -81,6 +81,12 @@ func runServer(grpcPort int, httpPort int) {
 	// 1. Initialize Raft Metadata Store
 	store := raft.NewMetadataStore("master-node")
 
+	// To simulate multi-node consensus, we register two peer metadata stores
+	peer1 := raft.NewMetadataStore("peer-node-1")
+	peer2 := raft.NewMetadataStore("peer-node-2")
+	store.AddPeer("peer-1", peer1)
+	store.AddPeer("peer-2", peer2)
+
 	// 2. Initialize Scheduler
 	sched := scheduler.NewScheduler(store)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -169,7 +175,13 @@ func runServer(grpcPort int, httpPort int) {
 		var err error
 		if req.MapSQL != "" && req.ReduceSQL != "" {
 			job, err = sched.SubmitMapReduceJob(req.MapSQL, req.ReduceSQL, req.InputFiles, req.NumPartitions, req.OutputDir)
+		} else if mapSQL, reduceSQL, keys, planErr := sched.PlanQuery(req.SQL, req.InputFiles, req.NumPartitions); planErr == nil {
+			// Auto-compile a single SQL statement into map/reduce + shuffle keys.
+			log.Printf("Planned query: keys=%v map=%q reduce=%q", keys, mapSQL, reduceSQL)
+			job, err = sched.SubmitMapReduceJob(mapSQL, reduceSQL, req.InputFiles, req.NumPartitions, req.OutputDir, keys...)
 		} else {
+			// Fallback: run the SQL as both map and reduce (legacy behavior).
+			log.Printf("PlanQuery unavailable (%v); falling back to single-SQL job", planErr)
 			job, err = sched.SubmitSQLJob(req.SQL, req.InputFiles, req.NumPartitions, req.OutputDir)
 		}
 		if err != nil {
@@ -299,6 +311,15 @@ func runServer(grpcPort int, httpPort int) {
 		workers := store.GetAllWorkers()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(workers)
+	})
+
+	// Queue depth drives the operator's autoscaler (scale out when tasks pile
+	// up, scale in when the queue drains).
+	mux.HandleFunc("/queue_depth", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]int{
+			"pending_tasks": sched.GetPendingTasksCount(),
+		})
 	})
 
 	log.Printf("REST HTTP API server listening on port %d", httpPort)

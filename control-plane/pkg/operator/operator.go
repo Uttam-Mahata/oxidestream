@@ -45,12 +45,13 @@ type ApplicationSpec struct {
 }
 
 type Operator struct {
-	spec      *ApplicationSpec
-	masterCmd *exec.Cmd
-	workers   []*exec.Cmd
-	stopChan  chan struct{}
-	logDir    string
-	mu        sync.Mutex
+	spec          *ApplicationSpec
+	masterCmd     *exec.Cmd
+	workers       []*exec.Cmd
+	stopChan      chan struct{}
+	logDir        string
+	workspacePath string
+	mu            sync.Mutex
 }
 
 // NewOperator reads and parses the configuration YAML file using a standard-library parser.
@@ -82,11 +83,21 @@ func NewOperator(configPath string) (*Operator, error) {
 		return nil, fmt.Errorf("failed to create log directory: %w", err)
 	}
 
+	workspace := os.Getenv("WORKSPACE_DIR")
+	if workspace == "" {
+		if _, err := os.Stat("data-plane/target/debug/data-plane"); err == nil {
+			workspace = "."
+		} else {
+			workspace = ".."
+		}
+	}
+
 	return &Operator{
-		spec:     spec,
-		workers:  make([]*exec.Cmd, spec.Workers.Replicas),
-		stopChan: make(chan struct{}),
-		logDir:   logDir,
+		spec:          spec,
+		workers:       make([]*exec.Cmd, spec.Workers.Replicas*2),
+		stopChan:      make(chan struct{}),
+		logDir:        logDir,
+		workspacePath: workspace,
 	}, nil
 }
 
@@ -177,7 +188,8 @@ func (op *Operator) Run(ctx context.Context) error {
 		_ = os.RemoveAll(dataDir)
 		_ = os.MkdirAll(dataDir, 0755)
 
-		go op.monitorWorker(i, dataDir)
+		go op.monitorWorkerExecutor(i, dataDir)
+		go op.monitorWorkerShuffle(i, dataDir)
 	}
 
 	// Wait for workers to register and heartbeat
@@ -269,7 +281,7 @@ func (op *Operator) startMaster() error {
 	return nil
 }
 
-func (op *Operator) monitorWorker(idx int, dataDir string) {
+func (op *Operator) monitorWorkerExecutor(idx int, dataDir string) {
 	for {
 		select {
 		case <-op.stopChan:
@@ -277,29 +289,30 @@ func (op *Operator) monitorWorker(idx int, dataDir string) {
 		default:
 		}
 
-		log.Printf("[Operator] Spawning worker-%d process...", idx+1)
-		cmd := exec.Command("/home/neutrino/oxidestream/data-plane/target/debug/data-plane",
+		dataPath := filepath.Join(op.workspacePath, "data-plane/target/debug/data-plane")
+		cmd := exec.Command(dataPath,
 			fmt.Sprintf("--worker-id=worker-%d", idx+1),
 			"--host=127.0.0.1",
-			fmt.Sprintf("--control-port=%d", op.spec.Workers.ControlPortStart+idx),
-			fmt.Sprintf("--flight-port=%d", op.spec.Workers.FlightPortStart+idx),
+			fmt.Sprintf("--control-port=%d", op.spec.Workers.ControlPortStart+2*idx),
+			fmt.Sprintf("--flight-port=%d", op.spec.Workers.FlightPortStart+2*idx),
 			fmt.Sprintf("--master-address=http://127.0.0.1:%d", op.spec.Master.GrpcPort),
 			fmt.Sprintf("--data-dir=%s", dataDir),
+			"--mode=executor",
 		)
 
-		logFile, err := os.Create(filepath.Join(op.logDir, fmt.Sprintf("worker-%d.log", idx+1)))
+		logFile, err := os.Create(filepath.Join(op.logDir, fmt.Sprintf("worker-%d-executor.log", idx+1)))
 		if err == nil {
 			cmd.Stdout = logFile
 			cmd.Stderr = logFile
 		}
 
 		op.mu.Lock()
-		op.workers[idx] = cmd
+		op.workers[2*idx] = cmd
 		op.mu.Unlock()
 
 		err = cmd.Start()
 		if err != nil {
-			log.Printf("[Operator] Failed to start worker-%d: %v. Retrying in 2s...", idx+1, err)
+			log.Printf("[Operator] Failed to start worker-%d executor: %v. Retrying in 2s...", idx+1, err)
 			if logFile != nil {
 				logFile.Close()
 			}
@@ -316,7 +329,61 @@ func (op *Operator) monitorWorker(idx int, dataDir string) {
 		case <-op.stopChan:
 			return
 		default:
-			log.Printf("[Operator] Worker-%d exited unexpectedly. Automatically re-spawning (Self-Healing)...", idx+1)
+			log.Printf("[Operator] Worker-%d executor exited unexpectedly. Automatically re-spawning (Self-Healing)...", idx+1)
+			time.Sleep(1 * time.Second)
+		}
+	}
+}
+
+func (op *Operator) monitorWorkerShuffle(idx int, dataDir string) {
+	for {
+		select {
+		case <-op.stopChan:
+			return
+		default:
+		}
+
+		dataPath := filepath.Join(op.workspacePath, "data-plane/target/debug/data-plane")
+		cmd := exec.Command(dataPath,
+			fmt.Sprintf("--worker-id=worker-%d", idx+1),
+			"--host=127.0.0.1",
+			fmt.Sprintf("--control-port=%d", op.spec.Workers.ControlPortStart+2*idx),
+			fmt.Sprintf("--flight-port=%d", op.spec.Workers.FlightPortStart+2*idx),
+			fmt.Sprintf("--master-address=http://127.0.0.1:%d", op.spec.Master.GrpcPort),
+			fmt.Sprintf("--data-dir=%s", dataDir),
+			"--mode=shuffle-service",
+		)
+
+		logFile, err := os.Create(filepath.Join(op.logDir, fmt.Sprintf("worker-%d-shuffle.log", idx+1)))
+		if err == nil {
+			cmd.Stdout = logFile
+			cmd.Stderr = logFile
+		}
+
+		op.mu.Lock()
+		op.workers[2*idx+1] = cmd
+		op.mu.Unlock()
+
+		err = cmd.Start()
+		if err != nil {
+			log.Printf("[Operator] Failed to start worker-%d shuffle: %v. Retrying in 2s...", idx+1, err)
+			if logFile != nil {
+				logFile.Close()
+			}
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		_ = cmd.Wait()
+		if logFile != nil {
+			logFile.Close()
+		}
+
+		select {
+		case <-op.stopChan:
+			return
+		default:
+			log.Printf("[Operator] Worker-%d shuffle exited unexpectedly. Automatically re-spawning (Self-Healing)...", idx+1)
 			time.Sleep(1 * time.Second)
 		}
 	}
@@ -407,7 +474,7 @@ func (op *Operator) scaleUp() {
 	op.mu.Lock()
 	defer op.mu.Unlock()
 
-	if len(op.workers) > op.spec.Workers.Replicas {
+	if len(op.workers) > op.spec.Workers.Replicas*2 {
 		return // already scaled up
 	}
 
@@ -415,8 +482,8 @@ func (op *Operator) scaleUp() {
 
 	extraReplicas := 2
 	totalCount := op.spec.Workers.Replicas + extraReplicas
-	if len(op.workers) < totalCount {
-		newWorkers := make([]*exec.Cmd, totalCount)
+	if len(op.workers) < totalCount*2 {
+		newWorkers := make([]*exec.Cmd, totalCount*2)
 		copy(newWorkers, op.workers)
 		op.workers = newWorkers
 	}
@@ -427,11 +494,12 @@ func (op *Operator) scaleUp() {
 		_ = os.RemoveAll(dataDir)
 		_ = os.MkdirAll(dataDir, 0755)
 
-		go op.monitorExtraWorker(idx, dataDir)
+		go op.monitorExtraWorkerExecutor(idx, dataDir)
+		go op.monitorExtraWorkerShuffle(idx, dataDir)
 	}
 }
 
-func (op *Operator) monitorExtraWorker(idx int, dataDir string) {
+func (op *Operator) monitorExtraWorkerExecutor(idx int, dataDir string) {
 	for {
 		select {
 		case <-op.stopChan:
@@ -439,29 +507,30 @@ func (op *Operator) monitorExtraWorker(idx int, dataDir string) {
 		default:
 		}
 
-		log.Printf("[Operator] Spawning extra worker-%d process...", idx+1)
-		cmd := exec.Command("/home/neutrino/oxidestream/data-plane/target/debug/data-plane",
+		dataPath := filepath.Join(op.workspacePath, "data-plane/target/debug/data-plane")
+		cmd := exec.Command(dataPath,
 			fmt.Sprintf("--worker-id=worker-extra-%d", idx+1),
 			"--host=127.0.0.1",
-			fmt.Sprintf("--control-port=%d", op.spec.Workers.ControlPortStart+idx),
-			fmt.Sprintf("--flight-port=%d", op.spec.Workers.FlightPortStart+idx),
+			fmt.Sprintf("--control-port=%d", op.spec.Workers.ControlPortStart+2*idx),
+			fmt.Sprintf("--flight-port=%d", op.spec.Workers.FlightPortStart+2*idx),
 			fmt.Sprintf("--master-address=http://127.0.0.1:%d", op.spec.Master.GrpcPort),
 			fmt.Sprintf("--data-dir=%s", dataDir),
+			"--mode=executor",
 		)
 
-		logFile, err := os.Create(filepath.Join(op.logDir, fmt.Sprintf("worker-extra-%d.log", idx+1)))
+		logFile, err := os.Create(filepath.Join(op.logDir, fmt.Sprintf("worker-extra-%d-executor.log", idx+1)))
 		if err == nil {
 			cmd.Stdout = logFile
 			cmd.Stderr = logFile
 		}
 
 		op.mu.Lock()
-		op.workers[idx] = cmd
+		op.workers[2*idx] = cmd
 		op.mu.Unlock()
 
 		err = cmd.Start()
 		if err != nil {
-			log.Printf("[Operator] Failed to start extra worker-%d: %v", idx+1, err)
+			log.Printf("[Operator] Failed to start extra worker-%d executor: %v", idx+1, err)
 			if logFile != nil {
 				logFile.Close()
 			}
@@ -479,13 +548,74 @@ func (op *Operator) monitorExtraWorker(idx int, dataDir string) {
 			return
 		default:
 			op.mu.Lock()
-			shouldRestart := idx < len(op.workers) && op.workers[idx] != nil
+			shouldRestart := 2*idx < len(op.workers) && op.workers[2*idx] != nil
 			op.mu.Unlock()
 
 			if !shouldRestart {
 				return
 			}
-			log.Printf("[Operator] Extra worker-%d exited. Restarting (Self-Healing)...", idx+1)
+			log.Printf("[Operator] Extra worker-%d executor exited. Restarting (Self-Healing)...", idx+1)
+			time.Sleep(1 * time.Second)
+		}
+	}
+}
+
+func (op *Operator) monitorExtraWorkerShuffle(idx int, dataDir string) {
+	for {
+		select {
+		case <-op.stopChan:
+			return
+		default:
+		}
+
+		dataPath := filepath.Join(op.workspacePath, "data-plane/target/debug/data-plane")
+		cmd := exec.Command(dataPath,
+			fmt.Sprintf("--worker-id=worker-extra-%d", idx+1),
+			"--host=127.0.0.1",
+			fmt.Sprintf("--control-port=%d", op.spec.Workers.ControlPortStart+2*idx),
+			fmt.Sprintf("--flight-port=%d", op.spec.Workers.FlightPortStart+2*idx),
+			fmt.Sprintf("--master-address=http://127.0.0.1:%d", op.spec.Master.GrpcPort),
+			fmt.Sprintf("--data-dir=%s", dataDir),
+			"--mode=shuffle-service",
+		)
+
+		logFile, err := os.Create(filepath.Join(op.logDir, fmt.Sprintf("worker-extra-%d-shuffle.log", idx+1)))
+		if err == nil {
+			cmd.Stdout = logFile
+			cmd.Stderr = logFile
+		}
+
+		op.mu.Lock()
+		op.workers[2*idx+1] = cmd
+		op.mu.Unlock()
+
+		err = cmd.Start()
+		if err != nil {
+			log.Printf("[Operator] Failed to start extra worker-%d shuffle: %v", idx+1, err)
+			if logFile != nil {
+				logFile.Close()
+			}
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		_ = cmd.Wait()
+		if logFile != nil {
+			logFile.Close()
+		}
+
+		select {
+		case <-op.stopChan:
+			return
+		default:
+			op.mu.Lock()
+			shouldRestart := 2*idx+1 < len(op.workers) && op.workers[2*idx+1] != nil
+			op.mu.Unlock()
+
+			if !shouldRestart {
+				return
+			}
+			log.Printf("[Operator] Extra worker-%d shuffle exited. Restarting (Self-Healing)...", idx+1)
 			time.Sleep(1 * time.Second)
 		}
 	}
@@ -495,22 +625,22 @@ func (op *Operator) scaleDown() {
 	op.mu.Lock()
 	defer op.mu.Unlock()
 
-	if len(op.workers) <= op.spec.Workers.Replicas {
+	if len(op.workers) <= op.spec.Workers.Replicas*2 {
 		return
 	}
 
 	log.Println("[Operator] Queue empty. Scaling down cluster: terminating extra workers...")
 
-	for i := op.spec.Workers.Replicas; i < len(op.workers); i++ {
+	for i := op.spec.Workers.Replicas * 2; i < len(op.workers); i++ {
 		cmd := op.workers[i]
 		if cmd != nil && cmd.Process != nil {
-			log.Printf("[Operator] Terminating extra worker-%d...", i+1)
+			log.Printf("[Operator] Terminating extra worker process %d...", i+1)
 			_ = cmd.Process.Kill()
 		}
 		op.workers[i] = nil
 	}
 
-	op.workers = op.workers[:op.spec.Workers.Replicas]
+	op.workers = op.workers[:op.spec.Workers.Replicas*2]
 }
 
 func (op *Operator) getQueueDepth() (int, error) {

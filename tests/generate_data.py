@@ -5,7 +5,7 @@ categories = ['action', 'comedy', 'drama', 'sci-fi']
 users = ['user_1', 'user_2', 'user_3', 'user_4', 'user_5']
 
 def generate_partition(filename, num_rows):
-    filepath = os.path.join('/home/neutrino/oxidestream/tests/data', filename)
+    filepath = os.path.join('/home/uttam/oxidestream/tests/data', filename)
     with open(filepath, 'w') as f:
         f.write("user_id,rating,timestamp,category\n")
         for i in range(num_rows):

@@ -15,6 +15,8 @@ service ControlPlane {
 service WorkerControl {
     rpc SubmitTask (SubmitTaskRequest) returns (SubmitTaskResponse);
     rpc CancelTask (CancelTaskRequest) returns (CancelTaskResponse);
+    // Compile a single SQL statement into a map/reduce plan with shuffle keys.
+    rpc PlanQuery (PlanQueryRequest) returns (PlanQueryResponse);
 }
 
 enum TaskStatus {
@@ -120,6 +122,25 @@ message SubmitTaskRequest {
     repeated int32 coalesced_partitions = 11;
     repeated string broadcast_files = 12;
     repeated string broadcast_table_names = 13;
+
+    // Columns to hash-partition the map output by (derived by the planner).
+    // When empty, the worker falls back to the "key" column / column 0.
+    repeated string partition_key_columns = 14;
+}
+
+// Planner: compile one SQL statement into a 2-stage map/reduce plan.
+message PlanQueryRequest {
+    string sql = 1;
+    repeated string input_files = 2;
+    int32 num_partitions = 3;
+}
+
+message PlanQueryResponse {
+    bool success = 1;
+    string message = 2;
+    string map_sql = 3;
+    string reduce_sql = 4;
+    repeated string partition_key_columns = 5;
 }
 
 message SubmitTaskResponse {

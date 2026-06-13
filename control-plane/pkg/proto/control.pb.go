@@ -800,6 +800,9 @@ type SubmitTaskRequest struct {
 	CoalescedPartitions []int32  `protobuf:"varint,11,rep,packed,name=coalesced_partitions,json=coalescedPartitions,proto3" json:"coalesced_partitions,omitempty"`
 	BroadcastFiles      []string `protobuf:"bytes,12,rep,name=broadcast_files,json=broadcastFiles,proto3" json:"broadcast_files,omitempty"`
 	BroadcastTableNames []string `protobuf:"bytes,13,rep,name=broadcast_table_names,json=broadcastTableNames,proto3" json:"broadcast_table_names,omitempty"`
+	// Columns to hash-partition the map output by (derived by the planner).
+	// When empty, the worker falls back to the "key" column / column 0.
+	PartitionKeyColumns []string `protobuf:"bytes,14,rep,name=partition_key_columns,json=partitionKeyColumns,proto3" json:"partition_key_columns,omitempty"`
 	unknownFields       protoimpl.UnknownFields
 	sizeCache           protoimpl.SizeCache
 }
@@ -925,6 +928,150 @@ func (x *SubmitTaskRequest) GetBroadcastTableNames() []string {
 	return nil
 }
 
+func (x *SubmitTaskRequest) GetPartitionKeyColumns() []string {
+	if x != nil {
+		return x.PartitionKeyColumns
+	}
+	return nil
+}
+
+// Planner: compile one SQL statement into a 2-stage map/reduce plan.
+type PlanQueryRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Sql           string                 `protobuf:"bytes,1,opt,name=sql,proto3" json:"sql,omitempty"`
+	InputFiles    []string               `protobuf:"bytes,2,rep,name=input_files,json=inputFiles,proto3" json:"input_files,omitempty"`
+	NumPartitions int32                  `protobuf:"varint,3,opt,name=num_partitions,json=numPartitions,proto3" json:"num_partitions,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PlanQueryRequest) Reset() {
+	*x = PlanQueryRequest{}
+	mi := &file_control_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PlanQueryRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PlanQueryRequest) ProtoMessage() {}
+
+func (x *PlanQueryRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_control_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PlanQueryRequest.ProtoReflect.Descriptor instead.
+func (*PlanQueryRequest) Descriptor() ([]byte, []int) {
+	return file_control_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *PlanQueryRequest) GetSql() string {
+	if x != nil {
+		return x.Sql
+	}
+	return ""
+}
+
+func (x *PlanQueryRequest) GetInputFiles() []string {
+	if x != nil {
+		return x.InputFiles
+	}
+	return nil
+}
+
+func (x *PlanQueryRequest) GetNumPartitions() int32 {
+	if x != nil {
+		return x.NumPartitions
+	}
+	return 0
+}
+
+type PlanQueryResponse struct {
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	Success             bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	Message             string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	MapSql              string                 `protobuf:"bytes,3,opt,name=map_sql,json=mapSql,proto3" json:"map_sql,omitempty"`
+	ReduceSql           string                 `protobuf:"bytes,4,opt,name=reduce_sql,json=reduceSql,proto3" json:"reduce_sql,omitempty"`
+	PartitionKeyColumns []string               `protobuf:"bytes,5,rep,name=partition_key_columns,json=partitionKeyColumns,proto3" json:"partition_key_columns,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
+}
+
+func (x *PlanQueryResponse) Reset() {
+	*x = PlanQueryResponse{}
+	mi := &file_control_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PlanQueryResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PlanQueryResponse) ProtoMessage() {}
+
+func (x *PlanQueryResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_control_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PlanQueryResponse.ProtoReflect.Descriptor instead.
+func (*PlanQueryResponse) Descriptor() ([]byte, []int) {
+	return file_control_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *PlanQueryResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *PlanQueryResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+func (x *PlanQueryResponse) GetMapSql() string {
+	if x != nil {
+		return x.MapSql
+	}
+	return ""
+}
+
+func (x *PlanQueryResponse) GetReduceSql() string {
+	if x != nil {
+		return x.ReduceSql
+	}
+	return ""
+}
+
+func (x *PlanQueryResponse) GetPartitionKeyColumns() []string {
+	if x != nil {
+		return x.PartitionKeyColumns
+	}
+	return nil
+}
+
 type SubmitTaskResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
@@ -935,7 +1082,7 @@ type SubmitTaskResponse struct {
 
 func (x *SubmitTaskResponse) Reset() {
 	*x = SubmitTaskResponse{}
-	mi := &file_control_proto_msgTypes[11]
+	mi := &file_control_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -947,7 +1094,7 @@ func (x *SubmitTaskResponse) String() string {
 func (*SubmitTaskResponse) ProtoMessage() {}
 
 func (x *SubmitTaskResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[11]
+	mi := &file_control_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -960,7 +1107,7 @@ func (x *SubmitTaskResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubmitTaskResponse.ProtoReflect.Descriptor instead.
 func (*SubmitTaskResponse) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{11}
+	return file_control_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *SubmitTaskResponse) GetSuccess() bool {
@@ -986,7 +1133,7 @@ type CancelTaskRequest struct {
 
 func (x *CancelTaskRequest) Reset() {
 	*x = CancelTaskRequest{}
-	mi := &file_control_proto_msgTypes[12]
+	mi := &file_control_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -998,7 +1145,7 @@ func (x *CancelTaskRequest) String() string {
 func (*CancelTaskRequest) ProtoMessage() {}
 
 func (x *CancelTaskRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[12]
+	mi := &file_control_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1011,7 +1158,7 @@ func (x *CancelTaskRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelTaskRequest.ProtoReflect.Descriptor instead.
 func (*CancelTaskRequest) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{12}
+	return file_control_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *CancelTaskRequest) GetTaskId() string {
@@ -1031,7 +1178,7 @@ type CancelTaskResponse struct {
 
 func (x *CancelTaskResponse) Reset() {
 	*x = CancelTaskResponse{}
-	mi := &file_control_proto_msgTypes[13]
+	mi := &file_control_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1043,7 +1190,7 @@ func (x *CancelTaskResponse) String() string {
 func (*CancelTaskResponse) ProtoMessage() {}
 
 func (x *CancelTaskResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[13]
+	mi := &file_control_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1056,7 +1203,7 @@ func (x *CancelTaskResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelTaskResponse.ProtoReflect.Descriptor instead.
 func (*CancelTaskResponse) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{13}
+	return file_control_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *CancelTaskResponse) GetSuccess() bool {
@@ -1131,7 +1278,7 @@ const file_control_proto_rawDesc = "" +
 	"\tworker_id\x18\x02 \x01(\tR\bworkerId\x12%\n" +
 	"\x0eflight_address\x18\x03 \x01(\tR\rflightAddress\x12$\n" +
 	"\x0emapper_task_id\x18\x04 \x01(\tR\fmapperTaskId\x12#\n" +
-	"\rpartition_ids\x18\x05 \x03(\x05R\fpartitionIds\"\x97\x04\n" +
+	"\rpartition_ids\x18\x05 \x03(\x05R\fpartitionIds\"\xcb\x04\n" +
 	"\x11SubmitTaskRequest\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x19\n" +
 	"\bstage_id\x18\x02 \x01(\tR\astageId\x121\n" +
@@ -1150,7 +1297,20 @@ const file_control_proto_rawDesc = "" +
 	" \x01(\tR\toutputDir\x121\n" +
 	"\x14coalesced_partitions\x18\v \x03(\x05R\x13coalescedPartitions\x12'\n" +
 	"\x0fbroadcast_files\x18\f \x03(\tR\x0ebroadcastFiles\x122\n" +
-	"\x15broadcast_table_names\x18\r \x03(\tR\x13broadcastTableNames\"H\n" +
+	"\x15broadcast_table_names\x18\r \x03(\tR\x13broadcastTableNames\x122\n" +
+	"\x15partition_key_columns\x18\x0e \x03(\tR\x13partitionKeyColumns\"l\n" +
+	"\x10PlanQueryRequest\x12\x10\n" +
+	"\x03sql\x18\x01 \x01(\tR\x03sql\x12\x1f\n" +
+	"\vinput_files\x18\x02 \x03(\tR\n" +
+	"inputFiles\x12%\n" +
+	"\x0enum_partitions\x18\x03 \x01(\x05R\rnumPartitions\"\xb3\x01\n" +
+	"\x11PlanQueryResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\x12\x17\n" +
+	"\amap_sql\x18\x03 \x01(\tR\x06mapSql\x12\x1d\n" +
+	"\n" +
+	"reduce_sql\x18\x04 \x01(\tR\treduceSql\x122\n" +
+	"\x15partition_key_columns\x18\x05 \x03(\tR\x13partitionKeyColumns\"H\n" +
 	"\x12SubmitTaskResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\",\n" +
@@ -1173,12 +1333,13 @@ const file_control_proto_rawDesc = "" +
 	"\fControlPlane\x12Q\n" +
 	"\x0eRegisterWorker\x12\x1e.control.RegisterWorkerRequest\x1a\x1f.control.RegisterWorkerResponse\x12B\n" +
 	"\tHeartbeat\x12\x19.control.HeartbeatRequest\x1a\x1a.control.HeartbeatResponse\x12W\n" +
-	"\x10UpdateTaskStatus\x12 .control.TaskStatusUpdateRequest\x1a!.control.TaskStatusUpdateResponse2\x9d\x01\n" +
+	"\x10UpdateTaskStatus\x12 .control.TaskStatusUpdateRequest\x1a!.control.TaskStatusUpdateResponse2\xe1\x01\n" +
 	"\rWorkerControl\x12E\n" +
 	"\n" +
 	"SubmitTask\x12\x1a.control.SubmitTaskRequest\x1a\x1b.control.SubmitTaskResponse\x12E\n" +
 	"\n" +
-	"CancelTask\x12\x1a.control.CancelTaskRequest\x1a\x1b.control.CancelTaskResponseB\x1fZ\x1dcontrol-plane/pkg/proto;protob\x06proto3"
+	"CancelTask\x12\x1a.control.CancelTaskRequest\x1a\x1b.control.CancelTaskResponse\x12B\n" +
+	"\tPlanQuery\x12\x19.control.PlanQueryRequest\x1a\x1a.control.PlanQueryResponseB\x1fZ\x1dcontrol-plane/pkg/proto;protob\x06proto3"
 
 var (
 	file_control_proto_rawDescOnce sync.Once
@@ -1193,7 +1354,7 @@ func file_control_proto_rawDescGZIP() []byte {
 }
 
 var file_control_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_control_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
+var file_control_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_control_proto_goTypes = []any{
 	(TaskStatus)(0),                  // 0: control.TaskStatus
 	(StageType)(0),                   // 1: control.StageType
@@ -1208,9 +1369,11 @@ var file_control_proto_goTypes = []any{
 	(*TaskStatusUpdateResponse)(nil), // 10: control.TaskStatusUpdateResponse
 	(*ShuffleInput)(nil),             // 11: control.ShuffleInput
 	(*SubmitTaskRequest)(nil),        // 12: control.SubmitTaskRequest
-	(*SubmitTaskResponse)(nil),       // 13: control.SubmitTaskResponse
-	(*CancelTaskRequest)(nil),        // 14: control.CancelTaskRequest
-	(*CancelTaskResponse)(nil),       // 15: control.CancelTaskResponse
+	(*PlanQueryRequest)(nil),         // 13: control.PlanQueryRequest
+	(*PlanQueryResponse)(nil),        // 14: control.PlanQueryResponse
+	(*SubmitTaskResponse)(nil),       // 15: control.SubmitTaskResponse
+	(*CancelTaskRequest)(nil),        // 16: control.CancelTaskRequest
+	(*CancelTaskResponse)(nil),       // 17: control.CancelTaskResponse
 }
 var file_control_proto_depIdxs = []int32{
 	7,  // 0: control.TableStats.col_stats:type_name -> control.ColumnStats
@@ -1223,14 +1386,16 @@ var file_control_proto_depIdxs = []int32{
 	4,  // 7: control.ControlPlane.Heartbeat:input_type -> control.HeartbeatRequest
 	9,  // 8: control.ControlPlane.UpdateTaskStatus:input_type -> control.TaskStatusUpdateRequest
 	12, // 9: control.WorkerControl.SubmitTask:input_type -> control.SubmitTaskRequest
-	14, // 10: control.WorkerControl.CancelTask:input_type -> control.CancelTaskRequest
-	3,  // 11: control.ControlPlane.RegisterWorker:output_type -> control.RegisterWorkerResponse
-	5,  // 12: control.ControlPlane.Heartbeat:output_type -> control.HeartbeatResponse
-	10, // 13: control.ControlPlane.UpdateTaskStatus:output_type -> control.TaskStatusUpdateResponse
-	13, // 14: control.WorkerControl.SubmitTask:output_type -> control.SubmitTaskResponse
-	15, // 15: control.WorkerControl.CancelTask:output_type -> control.CancelTaskResponse
-	11, // [11:16] is the sub-list for method output_type
-	6,  // [6:11] is the sub-list for method input_type
+	16, // 10: control.WorkerControl.CancelTask:input_type -> control.CancelTaskRequest
+	13, // 11: control.WorkerControl.PlanQuery:input_type -> control.PlanQueryRequest
+	3,  // 12: control.ControlPlane.RegisterWorker:output_type -> control.RegisterWorkerResponse
+	5,  // 13: control.ControlPlane.Heartbeat:output_type -> control.HeartbeatResponse
+	10, // 14: control.ControlPlane.UpdateTaskStatus:output_type -> control.TaskStatusUpdateResponse
+	15, // 15: control.WorkerControl.SubmitTask:output_type -> control.SubmitTaskResponse
+	17, // 16: control.WorkerControl.CancelTask:output_type -> control.CancelTaskResponse
+	14, // 17: control.WorkerControl.PlanQuery:output_type -> control.PlanQueryResponse
+	12, // [12:18] is the sub-list for method output_type
+	6,  // [6:12] is the sub-list for method input_type
 	6,  // [6:6] is the sub-list for extension type_name
 	6,  // [6:6] is the sub-list for extension extendee
 	0,  // [0:6] is the sub-list for field type_name
@@ -1247,7 +1412,7 @@ func file_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_control_proto_rawDesc), len(file_control_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   14,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

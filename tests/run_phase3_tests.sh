@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-WORKSPACE_DIR="/home/neutrino/oxidestream"
+WORKSPACE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_DIR="$WORKSPACE_DIR/tests"
 DATA_DIR="$TEST_DIR/data"
 
@@ -87,9 +87,9 @@ echo "Submitting join query against SQLite table user_status..."
 curl -s -X POST -H "Content-Type: application/json" -d '{
   "map_sql": "SELECT r.user_id, u.membership, COUNT(1) as rating_count, SUM(r.rating) as rating_sum FROM input r JOIN user_status u ON r.user_id = u.user_id GROUP BY r.user_id, u.membership",
   "reduce_sql": "SELECT user_id, membership, SUM(rating_count) as total_ratings, SUM(rating_sum) as total_rating_sum FROM input GROUP BY user_id, membership",
-  "input_files": ["/home/neutrino/oxidestream/tests/data/ratings_dpp.csv", "/home/neutrino/oxidestream/tests/data/user_metadata.db"],
+  "input_files": ["'"$WORKSPACE_DIR"'/tests/data/ratings_dpp.csv", "'"$WORKSPACE_DIR"'/tests/data/user_metadata.db"],
   "num_partitions": 2,
-  "output_dir": "/home/neutrino/oxidestream/tests/output_sqlite"
+  "output_dir": "'"$WORKSPACE_DIR"'/tests/output_sqlite"
 }' http://localhost:8080/submit
 
 sleep 4.5
@@ -117,9 +117,9 @@ start_cluster
 echo "Submitting ANALYZE TABLE query to calculate metrics on ratings_dpp.csv..."
 curl -s -X POST -H "Content-Type: application/json" -d '{
   "sql": "ANALYZE TABLE ratings_dpp",
-  "input_files": ["/home/neutrino/oxidestream/tests/data/ratings_dpp.csv"],
+  "input_files": ["'"$WORKSPACE_DIR"'/tests/data/ratings_dpp.csv"],
   "num_partitions": 1,
-  "output_dir": "/home/neutrino/oxidestream/tests/output_analyze"
+  "output_dir": "'"$WORKSPACE_DIR"'/tests/output_analyze"
 }' http://localhost:8080/submit
 
 sleep 3.5
@@ -148,18 +148,18 @@ echo "Submitting concurrent Job A..."
 curl -s -X POST -H "Content-Type: application/json" -d '{
   "map_sql": "SELECT user_id, COUNT(1) as cnt FROM input GROUP BY user_id",
   "reduce_sql": "SELECT user_id, SUM(cnt) FROM input GROUP BY user_id",
-  "input_files": ["/home/neutrino/oxidestream/tests/data/ratings_dpp.csv"],
+  "input_files": ["'"$WORKSPACE_DIR"'/tests/data/ratings_dpp.csv"],
   "num_partitions": 2,
-  "output_dir": "/home/neutrino/oxidestream/tests/output_fair_A"
+  "output_dir": "'"$WORKSPACE_DIR"'/tests/output_fair_A"
 }' http://localhost:8080/submit >/dev/null &
 
 echo "Submitting concurrent Job B..."
 curl -s -X POST -H "Content-Type: application/json" -d '{
   "map_sql": "SELECT user_id, SUM(rating) as s FROM input GROUP BY user_id",
   "reduce_sql": "SELECT user_id, SUM(s) FROM input GROUP BY user_id",
-  "input_files": ["/home/neutrino/oxidestream/tests/data/part-2.csv"],
+  "input_files": ["'"$WORKSPACE_DIR"'/tests/data/part-2.csv"],
   "num_partitions": 1,
-  "output_dir": "/home/neutrino/oxidestream/tests/output_fair_B"
+  "output_dir": "'"$WORKSPACE_DIR"'/tests/output_fair_B"
 }' http://localhost:8080/submit >/dev/null &
 
 sleep 4.5
@@ -188,19 +188,19 @@ echo "Submitting MapReduce query under Push-Based Shuffle environment..."
 curl -s -X POST -H "Content-Type: application/json" -d '{
   "map_sql": "SELECT user_id, COUNT(1) as rating_count, SUM(rating) as rating_sum FROM input GROUP BY user_id",
   "reduce_sql": "SELECT user_id, SUM(rating_count) as total_ratings, SUM(rating_sum) as total_rating_sum FROM input GROUP BY user_id",
-  "input_files": ["/home/neutrino/oxidestream/tests/data/part-2.csv"],
+  "input_files": ["'"$WORKSPACE_DIR"'/tests/data/part-2.csv"],
   "num_partitions": 2,
-  "output_dir": "/home/neutrino/oxidestream/tests/output_push"
+  "output_dir": "'"$WORKSPACE_DIR"'/tests/output_push"
 }' http://localhost:8080/submit
 
 sleep 4.5
 
 # Verify merged file was created on Merger Node (worker-1 data dir)
-merged_file="$TEST_DIR/data-dir-worker-1/merged_shuffle_map-stage_0.arrow"
-if [ -f "$merged_file" ] || [ -f "$TEST_DIR/data-dir-worker-1/merged_shuffle_map-stage_1.arrow" ]; then
+merged_file="$(ls "$TEST_DIR"/data-dir-worker-1/merged_shuffle_*_0.arrow 2>/dev/null | head -n 1)"
+if [ -n "$merged_file" ] && [ -f "$merged_file" ]; then
     echo "Test 4 SUCCESS: Merger Node consolidated shuffle data into merged partition files."
 else
-    echo "Test 4 FAILED: Consolidated shuffle file not found at $merged_file"
+    echo "Test 4 FAILED: Consolidated shuffle file not found"
     stop_cluster
     exit 1
 fi
@@ -230,9 +230,9 @@ echo "Submitting arithmetic projection query..."
 curl -s -X POST -H "Content-Type: application/json" -d '{
   "map_sql": "SELECT rating + 1 AS rating_plus_one, user_id FROM input",
   "reduce_sql": "SELECT user_id, SUM(rating_plus_one) FROM input GROUP BY user_id",
-  "input_files": ["/home/neutrino/oxidestream/tests/data/part-2.csv"],
+  "input_files": ["'"$WORKSPACE_DIR"'/tests/data/part-2.csv"],
   "num_partitions": 1,
-  "output_dir": "/home/neutrino/oxidestream/tests/output_codegen"
+  "output_dir": "'"$WORKSPACE_DIR"'/tests/output_codegen"
 }' http://localhost:8080/submit
 
 sleep 4.5

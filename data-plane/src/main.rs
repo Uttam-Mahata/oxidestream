@@ -13,6 +13,7 @@ pub mod streaming;
 pub mod ml_graph;
 pub mod connectors;
 pub mod codegen;
+pub mod planner;
 
 #[derive(Parser, Debug)]
 #[command(name = "data-plane", about = "OxideStream Data Plane Worker Node")]
@@ -40,6 +41,9 @@ struct Args {
 
     #[arg(long, default_value = "8192")]
     total_memory_mb: i64,
+
+    #[arg(long, default_value = "executor")]
+    mode: String,
 }
 
 #[tokio::main]
@@ -68,52 +72,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         running_tasks: Arc::new(RwLock::new(HashMap::new())),
     });
 
-    // 1. Register with Master
-    println!("Registering worker with master at {}...", state.master_address);
-    if let Err(e) = control::register_worker(&state).await {
-        eprintln!("Warning: Failed to register worker with master: {}. Will retry/continue...", e);
+    let is_shuffle = args.mode == "shuffle-service";
+
+    // 1. Register with Master (only if not shuffle-service)
+    if !is_shuffle {
+        println!("Registering worker with master at {}...", state.master_address);
+        if let Err(e) = control::register_worker(&state).await {
+            eprintln!("Warning: Failed to register worker with master: {}. Will retry/continue...", e);
+        }
+
+        // 2. Start heartbeat loop
+        println!("Starting heartbeat loop...");
+        control::start_heartbeat_loop(state.clone()).await;
     }
 
-    // 2. Start heartbeat loop
-    println!("Starting heartbeat loop...");
-    control::start_heartbeat_loop(state.clone()).await;
-
-    // 3. Start Arrow Flight Server
-    let flight_addr: SocketAddr = format!("0.0.0.0:{}", args.flight_port).parse()?;
-    println!("Starting Arrow Flight server on {}...", flight_addr);
-    let flight_server = flight::ShuffleFlightServer {
-        data_dir: state.data_dir.clone(),
-    };
-    let flight_service = arrow_flight::flight_service_server::FlightServiceServer::new(flight_server);
-    let flight_handle = tokio::spawn(async move {
-        if let Err(e) = tonic::transport::Server::builder()
-            .add_service(flight_service)
-            .serve(flight_addr)
-            .await
-        {
-            eprintln!("Arrow Flight server error: {}", e);
-        }
-    });
-
-    // 4. Start WorkerControl gRPC Server
-    let control_addr: SocketAddr = format!("0.0.0.0:{}", args.control_port).parse()?;
-    println!("Starting WorkerControl server on {}...", control_addr);
-    let control_server = control::WorkerControlImpl {
-        state: state.clone(),
-    };
-    let control_service = control::worker_control_server::WorkerControlServer::new(control_server);
-    let control_handle = tokio::spawn(async move {
-        if let Err(e) = tonic::transport::Server::builder()
-            .add_service(control_service)
-            .serve(control_addr)
-            .await
-        {
-            eprintln!("WorkerControl server error: {}", e);
-        }
-    });
-
-    // Wait for servers to finish (they run forever)
-    let _ = tokio::join!(flight_handle, control_handle);
+    if is_shuffle {
+        // 3. Start Arrow Flight Server
+        let flight_addr: SocketAddr = format!("0.0.0.0:{}", args.flight_port).parse()?;
+        println!("Starting Arrow Flight server on {}...", flight_addr);
+        let flight_server = flight::ShuffleFlightServer {
+            data_dir: state.data_dir.clone(),
+        };
+        let flight_service = arrow_flight::flight_service_server::FlightServiceServer::new(flight_server);
+        let flight_handle = tokio::spawn(async move {
+            if let Err(e) = tonic::transport::Server::builder()
+                .add_service(flight_service)
+                .serve(flight_addr)
+                .await
+            {
+                eprintln!("Arrow Flight server error: {}", e);
+            }
+        });
+        let _ = flight_handle.await;
+    } else {
+        // 4. Start WorkerControl gRPC Server
+        let control_addr: SocketAddr = format!("0.0.0.0:{}", args.control_port).parse()?;
+        println!("Starting WorkerControl server on {}...", control_addr);
+        let control_server = control::WorkerControlImpl {
+            state: state.clone(),
+        };
+        let control_service = control::worker_control_server::WorkerControlServer::new(control_server);
+        let control_handle = tokio::spawn(async move {
+            if let Err(e) = tonic::transport::Server::builder()
+                .add_service(control_service)
+                .serve(control_addr)
+                .await
+            {
+                eprintln!("WorkerControl server error: {}", e);
+            }
+        });
+        let _ = control_handle.await;
+    }
 
     Ok(())
 }

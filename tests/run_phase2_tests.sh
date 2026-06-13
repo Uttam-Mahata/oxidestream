@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-WORKSPACE_DIR="/home/neutrino/oxidestream"
+WORKSPACE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_DIR="$WORKSPACE_DIR/tests"
 DATA_DIR="$TEST_DIR/data"
 
@@ -107,12 +107,12 @@ EOF
 
 echo "Submitting Structured Streaming job to Master REST API..."
 curl -s -X POST -H "Content-Type: application/json" -d '{
-  "input_dir": "/home/neutrino/oxidestream/tests/streaming_input",
-  "checkpoint_file": "/home/neutrino/oxidestream/tests/checkpoint_status.json",
+  "input_dir": "'"$WORKSPACE_DIR"'/tests/streaming_input",
+  "checkpoint_file": "'"$WORKSPACE_DIR"'/tests/checkpoint_status.json",
   "map_sql": "SELECT r.user_id, c.category_name, COUNT(1) as rating_count, SUM(r.rating) as rating_sum, MAX(r.timestamp) as timestamp FROM input r JOIN category_lookup c ON r.category = c.category GROUP BY r.user_id, c.category_name",
   "reduce_sql": "SELECT user_id, category_name, SUM(rating_count) as total_ratings, SUM(rating_sum) as total_rating_sum FROM input GROUP BY user_id, category_name",
   "num_partitions": 2,
-  "output_dir": "/home/neutrino/oxidestream/tests/streaming_output"
+  "output_dir": "'"$WORKSPACE_DIR"'/tests/streaming_output"
 }' http://localhost:8080/submit_streaming
 
 echo "Waiting for Batch 1 to process..."
@@ -166,10 +166,10 @@ echo "Submitting DPP Job with dim_user.csv filter (active = true)..."
 curl -s -X POST -H "Content-Type: application/json" -d '{
   "map_sql": "SELECT user_id, COUNT(1) as rating_count, SUM(rating) as rating_sum FROM input GROUP BY user_id",
   "reduce_sql": "SELECT user_id, SUM(rating_count) as total_ratings, SUM(rating_sum) as total_rating_sum FROM input GROUP BY user_id",
-  "input_files": ["/home/neutrino/oxidestream/tests/data/ratings_dpp.csv"],
+  "input_files": ["'"$WORKSPACE_DIR"'/tests/data/ratings_dpp.csv"],
   "num_partitions": 2,
-  "output_dir": "/home/neutrino/oxidestream/tests/output_dpp",
-  "dpp_dim_file": "/home/neutrino/oxidestream/tests/data/dim_user.csv",
+  "output_dir": "'"$WORKSPACE_DIR"'/tests/output_dpp",
+  "dpp_dim_file": "'"$WORKSPACE_DIR"'/tests/data/dim_user.csv",
   "dpp_filter_col": "active",
   "dpp_filter_val": "true",
   "dpp_join_key": "user_id"
@@ -207,9 +207,9 @@ start_cluster
 
 echo "Submitting Linear Regression (OLS closed-form) Job to solve: y = 2*x1 + 3*x2..."
 curl -s -X POST -H "Content-Type: application/json" -d '{
-  "input_files": ["/home/neutrino/oxidestream/tests/data/lr_data.csv"],
+  "input_files": ["'"$WORKSPACE_DIR"'/tests/data/lr_data.csv"],
   "num_partitions": 2,
-  "output_dir": "/home/neutrino/oxidestream/tests/output_lr",
+  "output_dir": "'"$WORKSPACE_DIR"'/tests/output_lr",
   "iterations": 1
 }' http://localhost:8080/submit_lr
 
@@ -237,9 +237,9 @@ start_cluster
 
 echo "Submitting PageRank Graph Job..."
 curl -s -X POST -H "Content-Type: application/json" -d '{
-  "input_files": ["/home/neutrino/oxidestream/tests/data/pagerank_data.csv"],
+  "input_files": ["'"$WORKSPACE_DIR"'/tests/data/pagerank_data.csv"],
   "num_partitions": 2,
-  "output_dir": "/home/neutrino/oxidestream/tests/output_pr",
+  "output_dir": "'"$WORKSPACE_DIR"'/tests/output_pr",
   "iterations": 1
 }' http://localhost:8080/submit_pagerank
 

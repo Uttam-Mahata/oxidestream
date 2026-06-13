@@ -164,7 +164,7 @@ bash tests/run_phase2_tests.sh   # Phase 2: operator, streaming, DPP, ML, graph
 bash tests/run_phase3_tests.sh   # Phase 3: SQLite connector, push-based shuffle, codegen
 ```
 
-> **Note:** The test scripts hardcode `WORKSPACE_DIR=/home/neutrino/oxidestream`. Update this variable to match your local path before running.
+> **Note:** The test scripts derive `WORKSPACE_DIR` from their own location, so they run from any checkout without editing. Each starts the master, two executor workers, and a co-located shuffle-service per worker.
 
 ---
 

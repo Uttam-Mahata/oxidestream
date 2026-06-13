@@ -88,6 +88,7 @@ impl WorkerControl for WorkerControlImpl {
                             task.input_files,
                             task.map_sql,
                             task.num_partitions,
+                            task.partition_key_columns,
                             task.broadcast_files,
                             task.broadcast_table_names,
                             state_clone.worker_id.clone(),
@@ -124,6 +125,31 @@ impl WorkerControl for WorkerControlImpl {
             success: true,
             message: format!("Task {} submitted successfully", task_id),
         }))
+    }
+
+    async fn plan_query(
+        &self,
+        request: Request<PlanQueryRequest>,
+    ) -> Result<Response<PlanQueryResponse>, Status> {
+        let req = request.into_inner();
+        println!("Received PlanQueryRequest: sql={}", req.sql);
+
+        match crate::planner::plan_query(&req.sql, &req.input_files, req.num_partitions).await {
+            Ok(plan) => Ok(Response::new(PlanQueryResponse {
+                success: true,
+                message: "ok".to_string(),
+                map_sql: plan.map_sql,
+                reduce_sql: plan.reduce_sql,
+                partition_key_columns: plan.partition_key_columns,
+            })),
+            Err(e) => Ok(Response::new(PlanQueryResponse {
+                success: false,
+                message: format!("{}", e),
+                map_sql: String::new(),
+                reduce_sql: String::new(),
+                partition_key_columns: Vec::new(),
+            })),
+        }
     }
 
     async fn cancel_task(

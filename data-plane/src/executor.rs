@@ -80,9 +80,26 @@ fn get_row_hash(array: &ArrayRef, row_idx: usize) -> u64 {
     hasher.finish()
 }
 
+// Resolve the column indices to hash-partition on. Falls back to the column
+// literally named "key" (or column 0) when no planner-derived keys are given
+// or none of the named keys exist in this batch's schema.
+fn resolve_partition_key_indices(batch: &RecordBatch, partition_key_columns: &[String]) -> Vec<usize> {
+    if !partition_key_columns.is_empty() {
+        let resolved: Vec<usize> = partition_key_columns
+            .iter()
+            .filter_map(|name| batch.schema().index_of(name).ok())
+            .collect();
+        if !resolved.is_empty() {
+            return resolved;
+        }
+    }
+    vec![batch.schema().index_of("key").unwrap_or(0)]
+}
+
 fn partition_batch(
     batch: &RecordBatch,
     num_partitions: i32,
+    partition_key_columns: &[String],
 ) -> Result<Vec<RecordBatch>, Box<dyn std::error::Error + Send + Sync>> {
     let num_rows = batch.num_rows();
     let num_parts = num_partitions as usize;
@@ -92,12 +109,16 @@ fn partition_batch(
         return Ok(vec![batch.clone(); num_parts]);
     }
 
-    let partition_col_idx = batch.schema().index_of("key").unwrap_or(0);
-    let key_col = batch.column(partition_col_idx);
+    let key_indices = resolve_partition_key_indices(batch, partition_key_columns);
 
     for row_idx in 0..num_rows {
-        let hash = get_row_hash(key_col, row_idx);
-        let part_idx = (hash % (num_partitions as u64)) as usize;
+        // Combine the per-column hashes so multi-key GROUP BY / JOIN shuffles
+        // route rows with equal key tuples to the same partition.
+        let mut hasher = DefaultHasher::new();
+        for &col_idx in &key_indices {
+            get_row_hash(batch.column(col_idx), row_idx).hash(&mut hasher);
+        }
+        let part_idx = (hasher.finish() % (num_partitions as u64)) as usize;
         partition_indices[part_idx].push(row_idx as u32);
     }
 
@@ -340,6 +361,7 @@ pub async fn execute_map_task(
     input_files: Vec<String>,
     map_sql: String,
     num_partitions: i32,
+    partition_key_columns: Vec<String>,
     broadcast_files: Vec<String>,
     broadcast_table_names: Vec<String>,
     worker_id: String,
@@ -465,7 +487,7 @@ pub async fn execute_map_task(
         let mut partition_batches: Vec<Vec<RecordBatch>> = vec![Vec::new(); num_partitions as usize];
 
         for batch in batches {
-            let parted = partition_batch(&batch, num_partitions)?;
+            let parted = partition_batch(&batch, num_partitions, &partition_key_columns)?;
             for (p_idx, parted_batch) in parted.into_iter().enumerate() {
                 if parted_batch.num_rows() > 0 {
                     partition_batches[p_idx].push(parted_batch);
@@ -623,8 +645,10 @@ pub async fn execute_reduce_task(
             };
 
             for p_id in partition_ids_to_fetch {
+                let job_id = input.mapper_task_id.split("-map-").next().unwrap_or(&input.mapper_task_id);
+                let map_stage_id = format!("{}-map-stage", job_id);
                 let ticket_struct = crate::flight::ShuffleTicket {
-                    stage_id: "map-stage".to_string(),
+                    stage_id: map_stage_id,
                     task_id: input.mapper_task_id.clone(),
                     partition_id: p_id,
                 };
@@ -716,5 +740,84 @@ pub async fn execute_reduce_task(
             };
             let _ = control_client.update_task_status(update_req).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::{Int64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use std::collections::HashMap;
+
+    // Column 0 ("v") is unique per row; the key ("k") has duplicates. A correct
+    // hash partitioner must route rows by the named key, not by column 0.
+    fn sample_batch() -> RecordBatch {
+        let v = Int64Array::from(vec![1, 2, 3, 4, 5, 6]);
+        let k = StringArray::from(vec!["a", "b", "a", "b", "a", "b"]);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Int64, false),
+            Field::new("k", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(schema, vec![Arc::new(v), Arc::new(k)]).unwrap()
+    }
+
+    #[test]
+    fn partitions_by_named_key_keep_equal_keys_together() {
+        let batch = sample_batch();
+        let parts = partition_batch(&batch, 4, &["k".to_string()]).unwrap();
+
+        let mut key_to_part: HashMap<String, usize> = HashMap::new();
+        for (pidx, p) in parts.iter().enumerate() {
+            let kcol = p.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+            for i in 0..p.num_rows() {
+                let key = kcol.value(i).to_string();
+                if let Some(prev) = key_to_part.insert(key.clone(), pidx) {
+                    assert_eq!(prev, pidx, "key {} split across partitions {} and {}", key, prev, pidx);
+                }
+            }
+        }
+        assert_eq!(key_to_part.len(), 2, "both distinct keys should be present");
+    }
+
+    #[test]
+    fn multi_column_key_groups_equal_tuples() {
+        // Two key columns; equal (k1,k2) tuples must co-locate.
+        let k1 = StringArray::from(vec!["a", "a", "b", "a", "b"]);
+        let k2 = Int64Array::from(vec![1, 1, 2, 2, 2]);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("k1", DataType::Utf8, false),
+            Field::new("k2", DataType::Int64, false),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(k1), Arc::new(k2)]).unwrap();
+        let parts = partition_batch(&batch, 4, &["k1".to_string(), "k2".to_string()]).unwrap();
+
+        let mut tuple_to_part: HashMap<(String, i64), usize> = HashMap::new();
+        for (pidx, p) in parts.iter().enumerate() {
+            let c1 = p.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+            let c2 = p.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+            for i in 0..p.num_rows() {
+                let t = (c1.value(i).to_string(), c2.value(i));
+                if let Some(prev) = tuple_to_part.insert(t.clone(), pidx) {
+                    assert_eq!(prev, pidx, "tuple {:?} split across partitions", t);
+                }
+            }
+        }
+        // (a,1),(b,2),(a,2) are the three distinct tuples.
+        assert_eq!(tuple_to_part.len(), 3);
+    }
+
+    #[test]
+    fn empty_keys_fall_back_to_column_zero() {
+        let parts = partition_batch(&sample_batch(), 4, &[]).unwrap();
+        let total: usize = parts.iter().map(|p| p.num_rows()).sum();
+        assert_eq!(total, 6);
+    }
+
+    #[test]
+    fn unknown_key_name_falls_back_gracefully() {
+        let parts = partition_batch(&sample_batch(), 4, &["nope".to_string()]).unwrap();
+        let total: usize = parts.iter().map(|p| p.num_rows()).sum();
+        assert_eq!(total, 6);
     }
 }

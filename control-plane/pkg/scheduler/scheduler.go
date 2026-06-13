@@ -61,6 +61,9 @@ type Job struct {
 	MapTasks      map[string]*TaskState
 	ReduceTasks   map[string]*TaskState
 	Status        string // PENDING, RUNNING, COMPLETED, FAILED
+	// PartitionKeys are the columns to hash-partition the map output by,
+	// derived by the planner. Empty => worker falls back to "key"/column 0.
+	PartitionKeys []string
 	mu            sync.Mutex
 }
 
@@ -109,7 +112,7 @@ func (s *Scheduler) SubmitSQLJob(sql string, inputFiles []string, numPartitions 
 }
 
 // SubmitMapReduceJob adds a new job with separate map and reduce SQL queries to the scheduling queue.
-func (s *Scheduler) SubmitMapReduceJob(mapSQL string, reduceSQL string, inputFiles []string, numPartitions int32, outputDir string) (*Job, error) {
+func (s *Scheduler) SubmitMapReduceJob(mapSQL string, reduceSQL string, inputFiles []string, numPartitions int32, outputDir string, partitionKeys ...string) (*Job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -122,6 +125,7 @@ func (s *Scheduler) SubmitMapReduceJob(mapSQL string, reduceSQL string, inputFil
 		InputFiles:    inputFiles,
 		NumPartitions: numPartitions,
 		OutputDir:     outputDir,
+		PartitionKeys: partitionKeys,
 		Status:        "PENDING",
 	}
 
@@ -130,6 +134,47 @@ func (s *Scheduler) SubmitMapReduceJob(mapSQL string, reduceSQL string, inputFil
 	log.Printf("Submitted MapReduce job %s with %d files. Queue depth: %d", jobID, len(inputFiles), len(s.jobQueue))
 	s.jobCond.Signal()
 	return job, nil
+}
+
+// PlanQuery asks an active worker to compile a single SQL statement into a
+// map/reduce plan with hash-partition keys. Returns an error if no worker is
+// available or the worker cannot plan the query, so callers can fall back to
+// the manual map_sql/reduce_sql path.
+func (s *Scheduler) PlanQuery(sql string, inputFiles []string, numPartitions int32) (mapSQL, reduceSQL string, partitionKeys []string, err error) {
+	workers := s.store.GetActiveWorkers()
+	if len(workers) == 0 {
+		return "", "", nil, fmt.Errorf("no active workers available to plan query")
+	}
+
+	var lastErr error
+	for _, worker := range workers {
+		addr := fmt.Sprintf("%s:%d", worker.Host, worker.ControlPort)
+		conn, dialErr := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if dialErr != nil {
+			lastErr = dialErr
+			continue
+		}
+
+		client := pb.NewWorkerControlClient(conn)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		resp, rpcErr := client.PlanQuery(ctx, &pb.PlanQueryRequest{
+			Sql:           sql,
+			InputFiles:    inputFiles,
+			NumPartitions: numPartitions,
+		})
+		cancel()
+		conn.Close()
+
+		if rpcErr != nil {
+			lastErr = rpcErr
+			continue
+		}
+		if !resp.Success {
+			return "", "", nil, fmt.Errorf("planner rejected query: %s", resp.Message)
+		}
+		return resp.MapSql, resp.ReduceSql, resp.PartitionKeyColumns, nil
+	}
+	return "", "", nil, fmt.Errorf("failed to reach any worker to plan query: %v", lastErr)
 }
 
 // GetJobStatus retrieves the current execution status of a job.
@@ -221,7 +266,7 @@ func (s *Scheduler) runJob(ctx context.Context, job *Job) error {
 		taskID := fmt.Sprintf("%s-analyze", job.JobID)
 		job.MapTasks[taskID] = &TaskState{
 			TaskID:      taskID,
-			StageID:     "map-stage",
+			StageID:     job.JobID + "-map-stage",
 			StageType:   pb.StageType_STAGE_TYPE_MAP,
 			InputFiles:  job.InputFiles,
 			Status:      TaskPending,
@@ -329,7 +374,7 @@ func (s *Scheduler) runJob(ctx context.Context, job *Job) error {
 		taskID := fmt.Sprintf("%s-map-%d", job.JobID, i)
 		job.MapTasks[taskID] = &TaskState{
 			TaskID:              taskID,
-			StageID:             "map-stage",
+			StageID:             job.JobID + "-map-stage",
 			StageType:           pb.StageType_STAGE_TYPE_MAP,
 			InputFiles:          []string{file},
 			BroadcastFiles:      broadcastFiles,
@@ -455,7 +500,7 @@ func (s *Scheduler) runJob(ctx context.Context, job *Job) error {
 			taskID1 := fmt.Sprintf("%s-reduce-%d", job.JobID, outPartitionID*2+1)
 			job.ReduceTasks[taskID0] = &TaskState{
 				TaskID:              taskID0,
-				StageID:             "reduce-stage",
+				StageID:             job.JobID + "-reduce-stage",
 				StageType:           pb.StageType_STAGE_TYPE_REDUCE,
 				OutputPartitionID:   outPartitionID * 2,
 				CoalescedPartitions: []int32{p},
@@ -465,7 +510,7 @@ func (s *Scheduler) runJob(ctx context.Context, job *Job) error {
 			}
 			job.ReduceTasks[taskID1] = &TaskState{
 				TaskID:              taskID1,
-				StageID:             "reduce-stage",
+				StageID:             job.JobID + "-reduce-stage",
 				StageType:           pb.StageType_STAGE_TYPE_REDUCE,
 				OutputPartitionID:   outPartitionID*2 + 1,
 				CoalescedPartitions: []int32{p},
@@ -479,7 +524,7 @@ func (s *Scheduler) runJob(ctx context.Context, job *Job) error {
 		taskID := fmt.Sprintf("%s-reduce-%d", job.JobID, outPartitionID)
 		job.ReduceTasks[taskID] = &TaskState{
 			TaskID:              taskID,
-			StageID:             "reduce-stage",
+			StageID:             job.JobID + "-reduce-stage",
 			StageType:           pb.StageType_STAGE_TYPE_REDUCE,
 			OutputPartitionID:   outPartitionID,
 			CoalescedPartitions: group,
@@ -688,6 +733,7 @@ func (s *Scheduler) submitTaskToWorker(ctx context.Context, job *Job, task *Task
 			OutputDir:           job.OutputDir,
 			BroadcastFiles:      task.BroadcastFiles,
 			BroadcastTableNames: task.BroadcastTableNames,
+			PartitionKeyColumns: job.PartitionKeys,
 		}
 	} else {
 		type SourceKey struct {
@@ -851,9 +897,9 @@ func (s *Scheduler) HandleTaskStatusUpdate(taskID string, stageID string, worker
 	}
 
 	var tState *TaskState
-	if stageID == "map-stage" {
+	if strings.Contains(stageID, "map") {
 		tState = targetJob.MapTasks[taskID]
-	} else if stageID == "reduce-stage" {
+	} else if strings.Contains(stageID, "reduce") {
 		tState = targetJob.ReduceTasks[taskID]
 	}
 
@@ -873,7 +919,7 @@ func (s *Scheduler) HandleTaskStatusUpdate(taskID string, stageID string, worker
 	log.Printf("Task %s (%s) status updated to %v by worker %s", taskID, stageID, localStatus, workerID)
 
 	if localStatus == TaskCompleted {
-		if stageID == "map-stage" {
+		if strings.Contains(stageID, "map") {
 			for _, p := range partitions {
 				err := s.store.AddPartition(raft.PartitionInfo{
 					PartitionID:   p.PartitionId,
@@ -926,7 +972,7 @@ func (s *Scheduler) HandleTaskStatusUpdate(taskID string, stageID string, worker
 
 		// A5: Speculative execution — cancel the twin task now that one side has won.
 		var taskMap map[string]*TaskState
-		if stageID == "map-stage" {
+		if strings.Contains(stageID, "map") {
 			taskMap = targetJob.MapTasks
 		} else {
 			taskMap = targetJob.ReduceTasks
@@ -1093,7 +1139,7 @@ func (s *Scheduler) checkSpeculativeForJob(ctx context.Context, job *Job) {
 			SpeculativeOf:       t.TaskID,
 		}
 
-		if t.StageID == "map-stage" {
+		if strings.Contains(t.StageID, "map") {
 			job.MapTasks[specTaskID] = specTask
 		} else {
 			job.ReduceTasks[specTaskID] = specTask

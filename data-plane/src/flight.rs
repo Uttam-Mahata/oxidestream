@@ -10,7 +10,6 @@ use arrow_flight::{
 use serde::{Deserialize, Serialize};
 use arrow::ipc::reader::FileReader;
 use arrow::ipc::writer::FileWriter;
-use std::io::{Read, Seek};
 use tokio_stream::StreamExt;
 use futures::TryStreamExt;
 
@@ -77,7 +76,10 @@ impl FlightService for ShuffleFlightServer {
         if merged_file_path.exists() {
             let file = std::fs::File::open(&merged_file_path)
                 .map_err(|e| Status::not_found(format!("Merged shuffle file not found at {:?}: {}", merged_file_path, e)))?;
-            let reader = FileReader::try_new(file, None)
+            let mmap = unsafe { memmap2::MmapOptions::new().map(&file) }
+                .map_err(|e| Status::internal(format!("Failed to memory map file: {}", e)))?;
+            let cursor = std::io::Cursor::new(mmap);
+            let reader = FileReader::try_new(cursor, None)
                 .map_err(|e| Status::internal(format!("Failed to create IPC reader: {}", e)))?;
             let schema = reader.schema();
             let mut batches = Vec::new();
@@ -107,20 +109,30 @@ impl FlightService for ShuffleFlightServer {
         let arrow_file_name = format!("shuffle_{}_{}.arrow", ticket.stage_id, ticket.task_id);
         let arrow_file_path = self.data_dir.join(&arrow_file_name);
 
-        let mut file = std::fs::File::open(&arrow_file_path)
+        let file = std::fs::File::open(&arrow_file_path)
             .map_err(|e| Status::not_found(format!("Shuffle file not found at {:?}: {}", arrow_file_path, e)))?;
 
-        file.seek(std::io::SeekFrom::Start(part_range.offset))
-            .map_err(|e| Status::internal(format!("Failed to seek arrow file: {}", e)))?;
+        let mmap = unsafe { memmap2::MmapOptions::new().map(&file) }
+            .map_err(|e| Status::internal(format!("Failed to memory map file: {}", e)))?;
 
         if part_range.length == 0 {
             let stream = tokio_stream::iter(std::iter::empty());
             return Ok(Response::new(Box::pin(stream) as Self::DoGetStream));
         }
 
-        let take_reader = file.take(part_range.length);
+        let start = part_range.offset as usize;
+        let end = (part_range.offset + part_range.length) as usize;
+        if end > mmap.len() {
+            return Err(Status::internal(format!(
+                "Invalid partition range: offset {} + length {} = {} exceeds mmap length {}",
+                part_range.offset, part_range.length, end, mmap.len()
+            )));
+        }
 
-        let reader = FileReader::try_new(take_reader, None)
+        let slice = &mmap[start..end];
+        let cursor = std::io::Cursor::new(slice);
+
+        let reader = FileReader::try_new(cursor, None)
             .map_err(|e| Status::internal(format!("Failed to create IPC reader: {}", e)))?;
 
         let schema = reader.schema();
@@ -177,10 +189,13 @@ impl FlightService for ShuffleFlightServer {
             let mut all_batches = Vec::new();
             if file_path.exists() {
                 if let Ok(file) = std::fs::File::open(&file_path) {
-                    if let Ok(reader) = FileReader::try_new(file, None) {
-                        for b in reader {
-                            if let Ok(b) = b {
-                                all_batches.push(b);
+                    if let Ok(mmap) = unsafe { memmap2::MmapOptions::new().map(&file) } {
+                        let cursor = std::io::Cursor::new(mmap);
+                        if let Ok(reader) = FileReader::try_new(cursor, None) {
+                            for b in reader {
+                                if let Ok(b) = b {
+                                    all_batches.push(b);
+                                }
                             }
                         }
                     }
