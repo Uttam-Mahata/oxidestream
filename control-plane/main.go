@@ -14,6 +14,9 @@ import (
 	"strings"
 	"time"
 
+	"control-plane/pkg/auth"
+	"control-plane/pkg/config"
+	"control-plane/pkg/metrics"
 	"control-plane/pkg/operator"
 	pb "control-plane/pkg/proto"
 	"control-plane/pkg/raft"
@@ -21,6 +24,19 @@ import (
 	"control-plane/pkg/worker"
 	"google.golang.org/grpc"
 )
+
+func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next(w, r)
+	}
+}
 
 type grpcServer struct {
 	pb.UnimplementedControlPlaneServer
@@ -45,6 +61,9 @@ func (s *grpcServer) RegisterWorker(ctx context.Context, req *pb.RegisterWorkerR
 	if err != nil {
 		return &pb.RegisterWorkerResponse{Success: false, Message: err.Error()}, nil
 	}
+
+	metrics.WorkersActive.Set(float64(len(s.store.GetActiveWorkers())))
+
 	return &pb.RegisterWorkerResponse{Success: true, Message: "Worker registered successfully"}, nil
 }
 
@@ -75,8 +94,10 @@ func (s *grpcServer) UpdateTaskStatus(ctx context.Context, req *pb.TaskStatusUpd
 	return &pb.TaskStatusUpdateResponse{Success: true}, nil
 }
 
-func runServer(grpcPort int, httpPort int) {
+func runServer(cfg *config.Config) {
 	log.Printf("Starting OxideStream Control Plane (Master)...")
+
+	metrics.InitMetrics()
 
 	// 1. Initialize Raft Metadata Store
 	store := raft.NewMetadataStore("master-node")
@@ -95,17 +116,16 @@ func runServer(grpcPort int, httpPort int) {
 	go sched.Start(ctx)
 
 	// 3. Initialize Worker Tracker
-	// Timeout set to 10 seconds.
-	tracker := worker.NewTracker(store, 10*time.Second, func(workerID string) {
+	tracker := worker.NewTracker(store, cfg.HeartbeatTimeout, func(workerID string) {
 		sched.HandleWorkerFailure(workerID)
 	})
 	go tracker.Start(ctx)
 	defer tracker.Stop()
 
 	// 4. Start gRPC server
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", grpcPort))
+	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.GRPCPort))
 	if err != nil {
-		log.Fatalf("Failed to listen on gRPC port %d: %v", grpcPort, err)
+		log.Fatalf("Failed to listen on gRPC port %d: %v", cfg.GRPCPort, err)
 	}
 
 	grpcServerInstance := grpc.NewServer()
@@ -115,7 +135,7 @@ func runServer(grpcPort int, httpPort int) {
 	})
 
 	go func() {
-		log.Printf("gRPC Control Plane server listening on port %d", grpcPort)
+		log.Printf("gRPC Control Plane server listening on port %d", cfg.GRPCPort)
 		if err := grpcServerInstance.Serve(lis); err != nil {
 			log.Fatalf("gRPC server failed: %v", err)
 		}
@@ -124,7 +144,7 @@ func runServer(grpcPort int, httpPort int) {
 	// 5. REST HTTP Server configuration
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/submit", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/submit", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -189,14 +209,16 @@ func runServer(grpcPort int, httpPort int) {
 			return
 		}
 
+		metrics.JobsTotal.WithLabelValues("submitted").Inc()
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{
 			"job_id": job.JobID,
 			"status": job.Status,
 		})
-	})
+	}))
 
-	mux.HandleFunc("/submit_lr", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/submit_lr", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -226,9 +248,9 @@ func runServer(grpcPort int, httpPort int) {
 		}()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"message": "Linear Regression job started"})
-	})
+	}))
 
-	mux.HandleFunc("/submit_pagerank", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/submit_pagerank", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -258,9 +280,9 @@ func runServer(grpcPort int, httpPort int) {
 		}()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"message": "PageRank job started"})
-	})
+	}))
 
-	mux.HandleFunc("/submit_streaming", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/submit_streaming", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -287,9 +309,9 @@ func runServer(grpcPort int, httpPort int) {
 		}()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"message": "Streaming job started"})
-	})
+	}))
 
-	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/status", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		jobID := r.URL.Query().Get("job_id")
 		if jobID == "" {
 			http.Error(w, "Missing job_id query parameter", http.StatusBadRequest)
@@ -305,25 +327,74 @@ func runServer(grpcPort int, httpPort int) {
 			"job_id": jobID,
 			"status": status,
 		})
-	})
+	}))
 
-	mux.HandleFunc("/workers", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/workers", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		workers := store.GetAllWorkers()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(workers)
-	})
+	}))
 
-	// Queue depth drives the operator's autoscaler (scale out when tasks pile
-	// up, scale in when the queue drains).
-	mux.HandleFunc("/queue_depth", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/queue_depth", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]int{
 			"pending_tasks": sched.GetPendingTasksCount(),
 		})
-	})
+	}))
 
-	log.Printf("REST HTTP API server listening on port %d", httpPort)
-	if err := http.ListenAndServe(fmt.Sprintf(":%d", httpPort), mux); err != nil {
+	mux.Handle("/metrics/prometheus", metrics.MetricsHandler())
+
+	mux.HandleFunc("/jobs", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(sched.GetAllJobs())
+	}))
+
+	mux.HandleFunc("/jobs/", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/jobs/"), "/")
+		if len(parts) < 2 {
+			http.Error(w, "Invalid path", http.StatusBadRequest)
+			return
+		}
+		jobID := parts[0]
+		action := parts[1]
+		if action == "cancel" && r.Method == http.MethodPost {
+			if err := sched.CancelJob(jobID); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"status": "cancelled"})
+		} else if action == "tasks" && r.Method == http.MethodGet {
+			tasks, err := sched.GetJobTasks(jobID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(tasks)
+		} else {
+			http.Error(w, "Not found", http.StatusNotFound)
+		}
+	}))
+
+	mux.HandleFunc("/metrics", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(sched.GetMetrics())
+	}))
+
+	mux.HandleFunc("/health", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}))
+
+	var handler http.Handler = mux
+	handler = auth.CORSMiddleware(handler)
+	handler = auth.RateLimitMiddleware(handler)
+	handler = auth.RequestLoggingMiddleware(handler)
+	handler = auth.APIKeyMiddleware(handler)
+
+	log.Printf("REST HTTP API server listening on port %d", cfg.HTTPPort)
+	if err := http.ListenAndServe(fmt.Sprintf(":%d", cfg.HTTPPort), handler); err != nil {
 		log.Fatalf("HTTP server failed: %v", err)
 	}
 }
@@ -400,16 +471,29 @@ func runClient(httpPort int, sql string, inputs string, partitions int, output s
 }
 
 func main() {
-	grpcPort := flag.Int("grpc-port", 50050, "Port for the gRPC Control Plane server")
-	httpPort := flag.Int("http-port", 8080, "Port for the REST HTTP API server")
+	grpcPort := flag.Int("grpc-port", 0, "Port for the gRPC Control Plane server (overrides OXIDESTREAM_GRPC_PORT)")
+	httpPort := flag.Int("http-port", 0, "Port for the REST HTTP API server (overrides OXIDESTREAM_HTTP_PORT)")
 	submitJob := flag.Bool("submit", false, "Submit a SQL job to the control plane")
 	sql := flag.String("sql", "", "SQL query to execute (for submit)")
 	inputs := flag.String("inputs", "", "Comma-separated list of input CSV files (for submit)")
 	partitions := flag.Int("partitions", 1, "Number of partitions for reduce stage (for submit)")
 	output := flag.String("output", "", "Output directory (for submit)")
 	operatorConfig := flag.String("operator", "", "Path to the OxideStreamApplication YAML configuration for the operator simulator")
+	apiKeyFlag := flag.String("api-key", "", "Set an API key via CLI (overrides OXIDESTREAM_API_KEYS env var)")
 
 	flag.Parse()
+
+	cfg := config.Load()
+
+	if *grpcPort != 0 {
+		cfg.GRPCPort = *grpcPort
+	}
+	if *httpPort != 0 {
+		cfg.HTTPPort = *httpPort
+	}
+	if *apiKeyFlag != "" {
+		cfg.APIKeys = []string{*apiKeyFlag}
+	}
 
 	if *operatorConfig != "" {
 		op, err := operator.NewOperator(*operatorConfig)
@@ -429,8 +513,8 @@ func main() {
 			flag.Usage()
 			os.Exit(1)
 		}
-		runClient(*httpPort, *sql, *inputs, *partitions, *output)
+		runClient(cfg.HTTPPort, *sql, *inputs, *partitions, *output)
 	} else {
-		runServer(*grpcPort, *httpPort)
+		runServer(cfg)
 	}
 }

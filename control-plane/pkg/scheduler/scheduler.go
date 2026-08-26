@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"control-plane/pkg/metrics"
 	pb "control-plane/pkg/proto"
 	"control-plane/pkg/raft"
 	"google.golang.org/grpc"
@@ -238,16 +239,21 @@ func (s *Scheduler) Start(ctx context.Context) {
 			s.fairSched.RegisterJob(job.JobID, job)
 			defer s.fairSched.UnregisterJob(job.JobID)
 
+			jobStart := time.Now()
 			err := s.runJob(ctx, job)
+			jobDuration := time.Since(jobStart).Seconds()
 
 			job.mu.Lock()
 			if err != nil {
 				log.Printf("Job %s failed: %v", job.JobID, err)
 				job.Status = "FAILED"
+				metrics.JobsTotal.WithLabelValues("failed").Inc()
 			} else {
 				log.Printf("Job %s completed successfully", job.JobID)
 				job.Status = "COMPLETED"
+				metrics.JobsTotal.WithLabelValues("completed").Inc()
 			}
+			metrics.JobDuration.Observe(jobDuration)
 			job.mu.Unlock()
 		}(job)
 	}
@@ -607,11 +613,16 @@ func (s *Scheduler) dispatchPendingTasks(ctx context.Context, job *Job, tasks ma
 
 	// 1. Throttling using FairScheduler
 	runningTasksCount := 0
+	pendingTasksCount := 0
 	for _, task := range tasks {
 		if task.Status == TaskRunning {
 			runningTasksCount++
 		}
+		if task.Status == TaskPending {
+			pendingTasksCount++
+		}
 	}
+	metrics.QueueDepth.Set(float64(pendingTasksCount))
 
 	allowedTasks := s.fairSched.GetAllowedTasks(job.JobID)
 	slotsAvailable := allowedTasks - runningTasksCount
@@ -916,6 +927,15 @@ func (s *Scheduler) HandleTaskStatusUpdate(taskID string, stageID string, worker
 	tState.ErrorMsg = errorMsg
 	tState.LastUpdated = time.Now()
 
+	stageLabel := "map"
+	if strings.Contains(stageID, "reduce") {
+		stageLabel = "reduce"
+	}
+	metrics.TasksTotal.WithLabelValues(stageLabel, strings.ToLower(string(localStatus))).Inc()
+	if localStatus == TaskCompleted && !tState.StartTime.IsZero() {
+		metrics.TaskDuration.Observe(time.Since(tState.StartTime).Seconds())
+	}
+
 	log.Printf("Task %s (%s) status updated to %v by worker %s", taskID, stageID, localStatus, workerID)
 
 	if localStatus == TaskCompleted {
@@ -1177,6 +1197,190 @@ func (s *Scheduler) cancelTaskOnWorker(ctx context.Context, task *TaskState) {
 
 	client := pb.NewWorkerControlClient(conn)
 	_, _ = client.CancelTask(ctx, &pb.CancelTaskRequest{TaskId: task.TaskID})
+}
+
+type JobSummary struct {
+	JobID       string `json:"job_id"`
+	Status      string `json:"status"`
+	MapTasks    int    `json:"map_tasks"`
+	ReduceTasks int    `json:"reduce_tasks"`
+	CreatedAt   string `json:"created_at"`
+}
+
+func (s *Scheduler) GetAllJobs() []JobSummary {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var jobs []JobSummary
+	for _, job := range s.jobs {
+		job.mu.Lock()
+		summary := JobSummary{
+			JobID:       job.JobID,
+			Status:      job.Status,
+			MapTasks:    len(job.MapTasks),
+			ReduceTasks: len(job.ReduceTasks),
+		}
+		var createdAt time.Time
+		for _, t := range job.MapTasks {
+			if createdAt.IsZero() || t.LastUpdated.Before(createdAt) {
+				createdAt = t.LastUpdated
+			}
+		}
+		for _, t := range job.ReduceTasks {
+			if createdAt.IsZero() || t.LastUpdated.Before(createdAt) {
+				createdAt = t.LastUpdated
+			}
+		}
+		if !createdAt.IsZero() {
+			summary.CreatedAt = createdAt.Format(time.RFC3339)
+		}
+		job.mu.Unlock()
+		jobs = append(jobs, summary)
+	}
+	return jobs
+}
+
+func (s *Scheduler) CancelJob(jobID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job, exists := s.jobs[jobID]
+	if !exists {
+		return fmt.Errorf("job %s not found", jobID)
+	}
+	job.mu.Lock()
+	defer job.mu.Unlock()
+	if job.Status != "RUNNING" && job.Status != "PENDING" {
+		return fmt.Errorf("job %s is not cancellable (status: %s)", jobID, job.Status)
+	}
+	job.Status = "CANCELLED"
+	for _, task := range job.MapTasks {
+		if task.Status == TaskPending || task.Status == TaskRunning {
+			task.Status = TaskFailed
+			task.ErrorMsg = "cancelled"
+			if task.WorkerID != "" {
+				go s.cancelTaskOnWorker(context.Background(), task)
+			}
+		}
+	}
+	for _, task := range job.ReduceTasks {
+		if task.Status == TaskPending || task.Status == TaskRunning {
+			task.Status = TaskFailed
+			task.ErrorMsg = "cancelled"
+			if task.WorkerID != "" {
+				go s.cancelTaskOnWorker(context.Background(), task)
+			}
+		}
+	}
+	return nil
+}
+
+type TaskInfo struct {
+	TaskID     string        `json:"task_id"`
+	StageType  string        `json:"stage_type"`
+	WorkerID   string        `json:"worker_id"`
+	Status     string        `json:"status"`
+	StartTime  string        `json:"start_time"`
+	DurationMs int64         `json:"duration_ms"`
+}
+
+func (s *Scheduler) GetJobTasks(jobID string) ([]TaskInfo, error) {
+	s.mu.Lock()
+	job, exists := s.jobs[jobID]
+	s.mu.Unlock()
+	if !exists {
+		return nil, fmt.Errorf("job %s not found", jobID)
+	}
+	job.mu.Lock()
+	defer job.mu.Unlock()
+	var tasks []TaskInfo
+	for _, t := range job.MapTasks {
+		info := TaskInfo{
+			TaskID:    t.TaskID,
+			StageType: "MAP",
+			WorkerID:  t.WorkerID,
+			Status:    string(t.Status),
+			StartTime: t.StartTime.Format(time.RFC3339),
+		}
+		if !t.StartTime.IsZero() {
+			info.DurationMs = time.Since(t.StartTime).Milliseconds()
+		}
+		tasks = append(tasks, info)
+	}
+	for _, t := range job.ReduceTasks {
+		info := TaskInfo{
+			TaskID:    t.TaskID,
+			StageType: "REDUCE",
+			WorkerID:  t.WorkerID,
+			Status:    string(t.Status),
+			StartTime: t.StartTime.Format(time.RFC3339),
+		}
+		if !t.StartTime.IsZero() {
+			info.DurationMs = time.Since(t.StartTime).Milliseconds()
+		}
+		tasks = append(tasks, info)
+	}
+	return tasks, nil
+}
+
+type SystemMetrics struct {
+	TotalJobsSubmitted int `json:"total_jobs_submitted"`
+	JobsCompleted      int `json:"jobs_completed"`
+	JobsFailed         int `json:"jobs_failed"`
+	JobsActive         int `json:"jobs_active"`
+	ActiveWorkers      int `json:"active_workers"`
+	TasksRunning       int `json:"tasks_running"`
+	TasksPending       int `json:"tasks_pending"`
+	TasksCompleted     int `json:"tasks_completed"`
+	TasksFailed        int `json:"tasks_failed"`
+	UptimeSeconds      int64 `json:"uptime_seconds"`
+}
+
+var startTime = time.Now()
+
+func (s *Scheduler) GetMetrics() SystemMetrics {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	metrics := SystemMetrics{
+		ActiveWorkers: len(s.store.GetActiveWorkers()),
+		UptimeSeconds: int64(time.Since(startTime).Seconds()),
+	}
+	for _, job := range s.jobs {
+		job.mu.Lock()
+		metrics.TotalJobsSubmitted++
+		switch job.Status {
+		case "COMPLETED":
+			metrics.JobsCompleted++
+		case "FAILED", "CANCELLED":
+			metrics.JobsFailed++
+		case "RUNNING", "PENDING":
+			metrics.JobsActive++
+		}
+		for _, t := range job.MapTasks {
+			switch t.Status {
+			case TaskRunning:
+				metrics.TasksRunning++
+			case TaskPending:
+				metrics.TasksPending++
+			case TaskCompleted:
+				metrics.TasksCompleted++
+			case TaskFailed:
+				metrics.TasksFailed++
+			}
+		}
+		for _, t := range job.ReduceTasks {
+			switch t.Status {
+			case TaskRunning:
+				metrics.TasksRunning++
+			case TaskPending:
+				metrics.TasksPending++
+			case TaskCompleted:
+				metrics.TasksCompleted++
+			case TaskFailed:
+				metrics.TasksFailed++
+			}
+		}
+		job.mu.Unlock()
+	}
+	return metrics
 }
 
 // GetPendingTasksCount returns the total number of tasks currently in PENDING status.

@@ -1,0 +1,61 @@
+services:
+  control-plane:
+    build:
+      context: .
+      dockerfile: Dockerfile.control-plane
+    ports:
+      - "50050:50050"
+      - "8080:8080"
+    networks:
+      - oxidestream
+    volumes:
+      - test-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/workers"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  worker-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.data-plane
+    command: ["--worker-id", "worker-1", "--host", "worker-1", "--master-address", "http://control-plane:8080", "--data-dir", "/data/shuffle"]
+    depends_on:
+      control-plane:
+        condition: service_healthy
+    networks:
+      - oxidestream
+    volumes:
+      - test-data:/data
+
+  worker-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.data-plane
+    command: ["--worker-id", "worker-2", "--host", "worker-2", "--master-address", "http://control-plane:8080", "--data-dir", "/data/shuffle"]
+    depends_on:
+      control-plane:
+        condition: service_healthy
+    networks:
+      - oxidestream
+    volumes:
+      - test-data:/data
+
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    ports:
+      - "3000:80"
+    depends_on:
+      - control-plane
+    networks:
+      - oxidestream
+
+networks:
+  oxidestream:
+    driver: bridge
+
+volumes:
+  test-data:

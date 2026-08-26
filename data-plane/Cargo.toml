@@ -24,6 +24,8 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 sysinfo = "0.30"
 memmap2 = "0.9"
 datafusion-substrait = "37.0"
+axum = "0.7"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
 
 [build-dependencies]
 tonic-build = "0.11"

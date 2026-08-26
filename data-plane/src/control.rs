@@ -22,6 +22,24 @@ pub struct WorkerState {
     pub running_tasks: Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<()>>>>,
 }
 
+impl WorkerState {
+    pub fn running_tasks_count(&self) -> i32 {
+        self.active_tasks.load(Ordering::SeqCst)
+    }
+
+    pub fn cpu_usage(&self) -> f32 {
+        let mut system = sysinfo::System::new_all();
+        system.refresh_cpu_usage();
+        system.global_cpu_info().cpu_usage()
+    }
+
+    pub fn memory_used_mb(&self) -> i64 {
+        let mut system = sysinfo::System::new_all();
+        system.refresh_memory();
+        (system.used_memory() / 1024 / 1024) as i64
+    }
+}
+
 pub struct WorkerControlImpl {
     pub state: Arc<WorkerState>,
 }

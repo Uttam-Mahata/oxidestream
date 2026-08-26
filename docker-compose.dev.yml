@@ -1,0 +1,48 @@
+services:
+  control-plane:
+    build:
+      context: .
+      dockerfile: Dockerfile.control-plane
+    volumes:
+      - ./control-plane:/app
+      - ./proto:/proto
+    command: ["go", "run", "main.go", "-grpc-port", "50050", "-http-port", "8080"]
+    development: true
+
+  worker-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.data-plane
+    volumes:
+      - ./data-plane:/app
+      - ./proto:/proto
+      - cargo-cache:/usr/local/cargo/registry
+    command: ["cargo", "run", "--release", "--", "--worker-id", "worker-1", "--host", "worker-1", "--master-address", "http://control-plane:8080", "--data-dir", "/data/shuffle"]
+    development: true
+
+  worker-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.data-plane
+    volumes:
+      - ./data-plane:/app
+      - ./proto:/proto
+      - cargo-cache:/usr/local/cargo/registry
+    command: ["cargo", "run", "--release", "--", "--worker-id", "worker-2", "--host", "worker-2", "--master-address", "http://control-plane:8080", "--data-dir", "/data/shuffle"]
+    development: true
+
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    volumes:
+      - ./ui:/app
+      - /app/node_modules
+      - /app/dist
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+    ports:
+      - "3000:3000"
+    development: true
+
+volumes:
+  cargo-cache:

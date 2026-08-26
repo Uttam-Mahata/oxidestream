@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicI32;
 use std::collections::HashMap;
+use std::time::Instant;
 use tokio::sync::RwLock;
 
 pub mod control;
@@ -14,6 +15,7 @@ pub mod ml_graph;
 pub mod connectors;
 pub mod codegen;
 pub mod planner;
+pub mod http_server;
 
 #[derive(Parser, Debug)]
 #[command(name = "data-plane", about = "OxideStream Data Plane Worker Node")]
@@ -44,6 +46,9 @@ struct Args {
 
     #[arg(long, default_value = "executor")]
     mode: String,
+
+    #[arg(long, default_value = "9090")]
+    http_port: u16,
 }
 
 #[tokio::main]
@@ -70,6 +75,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         total_memory_mb: args.total_memory_mb,
         active_tasks: AtomicI32::new(0),
         running_tasks: Arc::new(RwLock::new(HashMap::new())),
+    });
+
+    let start_time = Instant::now();
+
+    let http_state = state.clone();
+    let http_port = args.http_port;
+    tokio::spawn(async move {
+        if let Err(e) = http_server::start_http_server(http_port, http_state, start_time).await {
+            eprintln!("HTTP server error: {}", e);
+        }
     });
 
     let is_shuffle = args.mode == "shuffle-service";
