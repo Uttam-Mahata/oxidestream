@@ -8,30 +8,22 @@ All inter-node data is represented as Apache Arrow `RecordBatch`es. Shuffle tran
 
 ## Architecture
 
-```
-                         ┌──────────────────────────────────────┐
-                         │       Go Control Plane (Master)       │
-                         │                                       │
-                         │  REST API  │  DAG Scheduler  │ Raft  │
-                         │            │  Fair Scheduler  │ Meta  │
-                         │            │  Streaming Sched │ Store │
-                         └──────────────────────┬───────────────┘
-                                                │ gRPC
-                    ┌───────────────────────────┼───────────────────────────┐
-                    ▼                           ▼                           ▼
-           ┌────────────────┐          ┌────────────────┐          ┌────────────────┐
-           │ Rust Worker 1  │          │ Rust Worker 2  │          │ Rust Worker N  │
-           │                │          │                │          │                │
-           │ DataFusion SQL │          │ DataFusion SQL │          │ DataFusion SQL │
-           │ Arrow Flight ◄─┼──────────┼─► Arrow Flight │          │ Arrow Flight   │
-           │ CodeGen        │  shuffle │ ESS            │          │ CodeGen        │
-           └────────────────┘          └────────────────┘          └────────────────┘
-```
+![System Overview](docs/images/level0-system-overview.png)
 
 **Communication Protocols:**
 - **Master to Workers:** gRPC `SubmitTask` / `CancelTask` (defined in `proto/control.proto`)
 - **Workers to Master:** gRPC `UpdateTaskStatus` with partition metadata and table statistics
 - **Workers to Workers:** Apache Arrow Flight for shuffle data transfer
+
+### Architecture Diagrams
+
+| Level | Diagram | Description |
+|-------|---------|-------------|
+| L0 | [System Overview](docs/images/level0-system-overview.png) | High-level system components and their relationships |
+| L1 | [Control Plane](docs/images/level1-control-plane.png) | Scheduler, metadata store, worker tracker, metrics |
+| L1 | [Data Plane](docs/images/level1-data-plane.png) | Executor, Flight server, codegen, connectors |
+| L2 | [Data Flow](docs/images/level2-data-flow.png) | Batch SQL execution pipeline (Map → Shuffle → Reduce) |
+| L2 | [Protocols](docs/images/level2-protocols.png) | gRPC, Arrow Flight, REST API specifications |
 
 ---
 
@@ -276,7 +268,13 @@ oxidestream/
 │   └── job_operator.yaml        # Example OxideStreamApplication CRD
 ├── docs/
 │   ├── API.md                   # Detailed API documentation
-│   └── ARCHITECTURE.md          # Architecture deep dive
+│   ├── ARCHITECTURE.md          # Architecture deep dive
+│   └── images/                  # Architecture diagrams (PNG)
+│       ├── level0-system-overview.png
+│       ├── level1-control-plane.png
+│       ├── level1-data-plane.png
+│       ├── level2-data-flow.png
+│       └── level2-protocols.png
 ├── Dockerfile.control-plane     # Multi-stage Docker build for master
 ├── Dockerfile.data-plane        # Multi-stage Docker build for workers
 ├── Dockerfile.ui                # Multi-stage Docker build for UI (nginx)
@@ -285,6 +283,11 @@ oxidestream/
 ├── nginx.conf                   # SPA routing + API proxy for UI
 ├── .dockerignore                # Docker build exclusions
 ├── .env.example                 # Documented environment variables
+├── tools/
+│   └── excalidraw/              # Diagram generation tooling
+│       ├── generate.mjs         # Generates .excalidraw files
+│       ├── export.mjs           # Exports to PNG
+│       └── output/              # Generated .excalidraw files
 ├── LICENSE                      # MIT License
 └── README.md
 ```

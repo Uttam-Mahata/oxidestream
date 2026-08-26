@@ -1,0 +1,15 @@
+{
+  "name": "oxidestream-diagrams",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate": "node generate.mjs",
+    "export": "node export.mjs",
+    "build": "node generate.mjs && node export.mjs"
+  },
+  "dependencies": {
+    "@swiftlysingh/excalidraw-cli": "^1.2.0",
+    "canvas": "^3.2.3"
+  }
+}

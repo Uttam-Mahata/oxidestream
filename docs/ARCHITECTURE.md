@@ -6,56 +6,13 @@ OxideStream is a distributed data processing engine with a strict language bound
 
 ## System Overview
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        Go Control Plane                             │
-│                                                                     │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐             │
-│  │   REST API    │  │ DAG Scheduler │  │ Raft Metadata│             │
-│  │  (HTTP/JSON)  │  │ Fair Scheduler│  │    Store     │             │
-│  │               │  │ Streaming     │  │  (Worker     │             │
-│  │  /submit      │  │ Scheduler     │  │   Registry,  │             │
-│  │  /status      │  │              │  │   Table      │             │
-│  │  /jobs        │  │  DPP Engine   │  │   Catalog)   │             │
-│  │  /workers     │  │  CBO Engine   │  │              │             │
-│  │  /metrics     │  │              │  │              │             │
-│  └──────┬───────┘  └──────┬───────┘  └──────────────┘             │
-│         │                  │                                        │
-│  ┌──────┴───────┐  ┌──────┴───────┐  ┌──────────────┐             │
-│  │ Worker Tracker│  │   Operator   │  │  Prometheus   │             │
-│  │  (Heartbeats, │  │  (K8s Sim)   │  │  Metrics     │             │
-│  │   Failure     │  │              │  │              │             │
-│  │   Detection)  │  │              │  │              │             │
-│  └──────────────┘  └──────────────┘  └──────────────┘             │
-└────────────────────────────┬────────────────────────────────────────┘
-                             │ gRPC
-            ┌────────────────┼────────────────┐
-            ▼                ▼                ▼
-   ┌────────────────┐ ┌────────────────┐ ┌────────────────┐
-   │  Rust Worker 1  │ │  Rust Worker 2  │ │  Rust Worker N  │
-   │                 │ │                 │ │                 │
-   │ ┌─────────────┐ │ │ ┌─────────────┐ │ │ ┌─────────────┐ │
-   │ │ DataFusion   │ │ │ │ DataFusion   │ │ │ │ DataFusion   │ │
-   │ │ SessionCtx  │ │ │ │ SessionCtx  │ │ │ │ SessionCtx  │ │
-   │ └─────────────┘ │ │ └─────────────┘ │ │ └─────────────┘ │
-   │ ┌─────────────┐ │ │ ┌─────────────┐ │ │ ┌─────────────┐ │
-   │ │ Arrow Flight │ │ │ │ Arrow Flight │ │ │ │ Arrow Flight │ │
-   │ │   Server    │ │ │ │   Server    │ │ │ │   Server    │ │
-   │ │ (ESS)       │ │ │ │ (ESS)       │ │ │ │ (ESS)       │ │
-   │ └─────────────┘ │ │ └─────────────┘ │ │ └─────────────┘ │
-   │ ┌─────────────┐ │ │ ┌─────────────┐ │ │ ┌─────────────┐ │
-   │ │  CodeGen    │ │ │ │  CodeGen    │ │ │ │  CodeGen    │ │
-   │ └─────────────┘ │ │ └─────────────┘ │ │ └─────────────┘ │
-   └────────────────┘ └────────────────┘ └────────────────┘
-            ▲                ▲                ▲
-            │  Arrow Flight   │                │
-            └────────────────┴────────────────┘
-                     Shuffle Transport
-```
+![System Overview](images/level0-system-overview.png)
 
 ---
 
 ## Control Plane Internals
+
+![Control Plane Internals](images/level1-control-plane.png)
 
 The control plane is implemented in Go and runs as a single master process.
 
@@ -112,6 +69,8 @@ When joining a partitioned fact table against a dimension table:
 ---
 
 ## Data Plane Internals
+
+![Data Plane Internals](images/level1-data-plane.png)
 
 Each worker is a Rust process running in `data-plane/`.
 
@@ -183,6 +142,8 @@ The ML/graph module (`data-plane/src/ml_graph.rs`) implements:
 
 ## Communication Protocols
 
+![Communication Protocols](images/level2-protocols.png)
+
 ### gRPC (Control Plane <-> Data Plane)
 
 Defined in `proto/control.proto`. Two services:
@@ -213,47 +174,20 @@ JSON-based REST API for job submission, monitoring, and cluster management. See 
 
 ## Data Flow
 
+![Batch SQL Data Flow](images/level2-data-flow.png)
+
 ### Batch SQL Execution
 
-```
-Client                 Master                    Worker 1              Worker 2
-  │                      │                         │                     │
-  │  POST /submit        │                         │                     │
-  │─────────────────────>│                         │                     │
-  │                      │  SubmitTask (MAP)       │                     │
-  │                      │────────────────────────>│                     │
-  │                      │  SubmitTask (MAP)       │                     │
-  │                      │──────────────────────────────────────────────>│
-  │  {job_id, status}    │                         │                     │
-  │<─────────────────────│                         │                     │
-  │                      │                         │                     │
-  │                      │                         │ Read CSV + SQL      │
-  │                      │                         │ Write .arrow + .index
-  │                      │  UpdateTaskStatus       │                     │
-  │                      │<────────────────────────│                     │
-  │                      │                         │                     │
-  │                      │                         │ Read CSV + SQL      │
-  │                      │                         │ Write .arrow + .index
-  │                      │  UpdateTaskStatus       │                     │
-  │                      │<─────────────────────────────────────────────│
-  │                      │                         │                     │
-  │                      │  [AQE: coalesce]        │                     │
-  │                      │                         │                     │
-  │                      │  SubmitTask (REDUCE)    │                     │
-  │                      │────────────────────────>│                     │
-  │                      │  SubmitTask (REDUCE)    │                     │
-  │                      │──────────────────────────────────────────────>│
-  │                      │                         │                     │
-  │                      │                         │ Arrow Flight Get    │
-  │                      │                         │<────────────────────│
-  │                      │                         │ Fetch partitions    │
-  │                      │                         │ from Worker 2       │
-  │                      │                         │                     │
-  │                      │                         │ Run reduce SQL      │
-  │                      │                         │ Write output CSV    │
-  │  {status: COMPLETED} │  UpdateTaskStatus       │                     │
-  │<─────────────────────│<────────────────────────│                     │
-```
+The batch SQL execution follows a Map → Shuffle → Reduce pipeline:
+
+1. Client submits a job via `POST /submit`
+2. Master schedules Map tasks on workers via gRPC `SubmitTask`
+3. Workers read CSV input, execute SQL, and write Arrow IPC shuffle files with JSON index metadata
+4. Workers report partition sizes back to master via `UpdateTaskStatus`
+5. Master applies AQE (Adaptive Query Execution) to coalesce small partitions
+6. Master schedules Reduce tasks, specifying shuffle input sources
+7. Reducers fetch partition data from mapper workers via Arrow Flight
+8. Reducers execute the reduce SQL and write final output
 
 ### Structured Streaming Flow
 
