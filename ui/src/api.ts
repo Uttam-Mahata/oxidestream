@@ -1,6 +1,6 @@
-import type { JobStatusResponse, QueueDepthResponse, Worker } from './types'
+import type { JobStatusResponse, JobSummary, QueueDepthResponse, SystemMetrics, TaskInfo, Worker } from './types'
 
-const BASE = 'http://localhost:8080'
+const BASE = ''
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, init)
@@ -21,6 +21,24 @@ export function getQueueDepth(): Promise<QueueDepthResponse> {
 
 export function getJobStatus(jobId: string): Promise<JobStatusResponse> {
   return request<JobStatusResponse>(`/status?job_id=${encodeURIComponent(jobId)}`)
+}
+
+export function getAllJobs(): Promise<JobSummary[]> {
+  return request<JobSummary[]>('/jobs')
+}
+
+export function getJobTasks(jobId: string): Promise<TaskInfo[]> {
+  return request<TaskInfo[]>(`/jobs/${encodeURIComponent(jobId)}/tasks`)
+}
+
+export function cancelJob(jobId: string): Promise<{ status: string }> {
+  return request<{ status: string }>(`/jobs/${encodeURIComponent(jobId)}/cancel`, {
+    method: 'POST',
+  })
+}
+
+export function getMetrics(): Promise<SystemMetrics> {
+  return request<SystemMetrics>('/metrics')
 }
 
 export function submitJob(body: {

@@ -9,9 +9,9 @@ import Streaming from './pages/Streaming'
 
 export default function App() {
   return (
-    <div className="flex min-h-screen bg-gray-900 text-white">
+    <div className="flex min-h-screen bg-slate-950 text-slate-100 antialiased font-sans">
       <Sidebar />
-      <main className="flex-1 p-6 overflow-y-auto">
+      <main className="flex-1 p-8 overflow-y-auto bg-slate-950">
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/submit" element={<SubmitJob />} />

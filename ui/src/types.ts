@@ -16,6 +16,27 @@ export interface JobStatusResponse {
   status: string
 }
 
+export interface JobSummary {
+  job_id: string
+  status: string
+  map_tasks: number
+  reduce_tasks: number
+  created_at?: string
+}
+
+export interface SystemMetrics {
+  total_jobs_submitted: number
+  jobs_completed: number
+  jobs_failed: number
+  jobs_active: number
+  active_workers: number
+  tasks_running: number
+  tasks_pending: number
+  tasks_completed: number
+  tasks_failed: number
+  uptime_seconds: number
+}
+
 export interface QueueDepthResponse {
   pending_tasks: number
 }
