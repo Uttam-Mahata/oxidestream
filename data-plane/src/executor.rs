@@ -147,12 +147,33 @@ fn partition_batch(
     Ok(partitioned_batches)
 }
 
+fn resolve_file_path(file_path: &str) -> String {
+    let p = Path::new(file_path);
+    if p.is_absolute() && p.exists() {
+        return file_path.to_string();
+    }
+    // Try relative to current working directory
+    if p.exists() {
+        return file_path.to_string();
+    }
+    // Try stripping leading path components or matching relative to repo root
+    let components: Vec<_> = p.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect();
+    if let Some(pos) = components.iter().position(|c| c == "tests") {
+        let rel_path = components[pos..].join("/");
+        if Path::new(&rel_path).exists() {
+            return rel_path;
+        }
+    }
+    file_path.to_string()
+}
+
 pub async fn register_input_files(
     ctx: &SessionContext,
     input_files: &[String],
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    for file_path in input_files {
-        let path = Path::new(file_path);
+    for raw_file_path in input_files {
+        let file_path = resolve_file_path(raw_file_path);
+        let path = Path::new(&file_path);
         let filename = path.file_name()
             .and_then(|f| f.to_str())
             .ok_or_else(|| format!("Invalid input file path: {}", file_path))?;
@@ -162,14 +183,14 @@ pub async fn register_input_files(
             .ok_or_else(|| format!("Invalid input file path stem: {}", file_path))?;
 
         if filename.ends_with(".parquet") {
-            ctx.register_parquet(table_name, file_path, ParquetReadOptions::default()).await?;
-            ctx.register_parquet("input", file_path, ParquetReadOptions::default()).await?;
+            ctx.register_parquet(table_name, &file_path, ParquetReadOptions::default()).await?;
+            ctx.register_parquet("input", &file_path, ParquetReadOptions::default()).await?;
         } else if filename.ends_with(".csv") || filename.contains(".csv") {
-            ctx.register_csv(table_name, file_path, CsvReadOptions::default()).await?;
-            ctx.register_csv("input", file_path, CsvReadOptions::default()).await?;
+            ctx.register_csv(table_name, &file_path, CsvReadOptions::default()).await?;
+            ctx.register_csv("input", &file_path, CsvReadOptions::default()).await?;
         } else if filename.ends_with(".db") || filename.contains(".sqlite") || filename.contains(".sqlite3") {
             let table_names = {
-                let conn = rusqlite::Connection::open(file_path)?;
+                let conn = rusqlite::Connection::open(&file_path)?;
                 let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type='table'")?;
                 let mut rows = stmt.query([])?;
                 let mut tbls = Vec::new();
@@ -180,7 +201,7 @@ pub async fn register_input_files(
                 tbls
             };
             for tbl_name in table_names {
-                crate::connectors::register_sqlite_table(ctx, file_path, &tbl_name).await?;
+                crate::connectors::register_sqlite_table(ctx, &file_path, &tbl_name).await?;
             }
         } else {
             return Err(format!("Unsupported input file format: {}", file_path).into());
@@ -195,19 +216,20 @@ pub async fn register_broadcast_files(
     broadcast_table_names: &[String],
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if broadcast_files.len() == broadcast_table_names.len() {
-        for (file_path, table_name) in broadcast_files.iter().zip(broadcast_table_names.iter()) {
-            let path = Path::new(file_path);
+        for (raw_file_path, table_name) in broadcast_files.iter().zip(broadcast_table_names.iter()) {
+            let file_path = resolve_file_path(raw_file_path);
+            let path = Path::new(&file_path);
             let filename = path.file_name()
                 .and_then(|f| f.to_str())
                 .ok_or_else(|| format!("Invalid broadcast file path: {}", file_path))?;
 
             if filename.ends_with(".parquet") {
-                ctx.register_parquet(table_name, file_path, ParquetReadOptions::default()).await?;
+                ctx.register_parquet(table_name, &file_path, ParquetReadOptions::default()).await?;
             } else if filename.ends_with(".csv") || filename.contains(".csv") {
-                ctx.register_csv(table_name, file_path, CsvReadOptions::default()).await?;
+                ctx.register_csv(table_name, &file_path, CsvReadOptions::default()).await?;
             } else if filename.ends_with(".db") || filename.contains(".sqlite") || filename.contains(".sqlite3") {
                 let table_names = {
-                    let conn = rusqlite::Connection::open(file_path)?;
+                    let conn = rusqlite::Connection::open(&file_path)?;
                     let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type='table'")?;
                     let mut rows = stmt.query([])?;
                     let mut tbls = Vec::new();
@@ -218,7 +240,7 @@ pub async fn register_broadcast_files(
                     tbls
                 };
                 for tbl_name in table_names {
-                    crate::connectors::register_sqlite_table(ctx, file_path, &tbl_name).await?;
+                    crate::connectors::register_sqlite_table(ctx, &file_path, &tbl_name).await?;
                 }
             } else {
                 return Err(format!("Unsupported broadcast file format: {}", file_path).into());

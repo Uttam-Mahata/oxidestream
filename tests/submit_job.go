@@ -18,13 +18,13 @@ func main() {
 		"map_sql":        "SELECT r.user_id, c.category_name, COUNT(1) as rating_count, SUM(r.rating) as rating_sum FROM input r JOIN category_lookup c ON r.category = c.category GROUP BY r.user_id, c.category_name",
 		"reduce_sql":     "SELECT user_id, category_name, SUM(rating_count) as total_ratings, SUM(rating_sum) as total_rating_sum FROM input GROUP BY user_id, category_name",
 		"input_files": []string{
-			"/home/uttam/oxidestream/tests/data/part-0.csv",
-			"/home/uttam/oxidestream/tests/data/part-1.csv",
-			"/home/uttam/oxidestream/tests/data/part-2.csv",
-			"/home/uttam/oxidestream/tests/data/category_lookup.csv",
+			"tests/data/part-0.csv",
+			"tests/data/part-1.csv",
+			"tests/data/part-2.csv",
+			"tests/data/category_lookup.csv",
 		},
 		"num_partitions": 4,
-		"output_dir":     "/home/uttam/oxidestream/tests/output",
+		"output_dir":     "tests/output",
 	}
 
 	reqBytes, err := json.Marshal(payload)
