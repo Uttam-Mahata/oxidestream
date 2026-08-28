@@ -1,6 +1,6 @@
 import type { JobStatusResponse, JobSummary, QueueDepthResponse, SystemMetrics, TaskInfo, Worker } from './types'
 
-const BASE = ''
+const BASE = '/api'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, init)
